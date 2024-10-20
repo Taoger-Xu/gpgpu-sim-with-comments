@@ -62,3 +62,6 @@ accel-sim-framework/
 gpu-app-collection/
 
 setup
+
+test/
+.vscode/

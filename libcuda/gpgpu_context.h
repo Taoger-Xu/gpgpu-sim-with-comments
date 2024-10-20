@@ -8,6 +8,9 @@
 #include "../src/gpgpusim_entrypoint.h"
 #include "cuda_api_object.h"
 
+/**
+ * 整个GPGPU-sim模拟过程中最顶层的抽象
+ */
 class gpgpu_context {
  public:
   gpgpu_context() {

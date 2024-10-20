@@ -32,33 +32,33 @@
 #include <stdlib.h>
 
 void push_stack(Stack *S, address_type val) {
-  assert(S->top < S->max_size);
-  S->v[S->top] = val;
-  (S->top)++;
+    assert(S->top < S->max_size);
+    S->v[S->top] = val;
+    (S->top)++;
 }
 
 address_type pop_stack(Stack *S) {
-  (S->top)--;
-  return (S->v[S->top]);
+    (S->top)--;
+    return (S->v[S->top]);
 }
 
 address_type top_stack(Stack *S) {
-  assert(S->top >= 1);
-  return (S->v[S->top - 1]);
+    assert(S->top >= 1);
+    return (S->v[S->top - 1]);
 }
 
 Stack *new_stack(int size) {
-  Stack *S;
-  S = (Stack *)malloc(sizeof(Stack));
-  S->max_size = size;
-  S->top = 0;
-  S->v = (address_type *)calloc(size, sizeof(address_type));
-  return S;
+    Stack *S;
+    S = (Stack *)malloc(sizeof(Stack));
+    S->max_size = size;
+    S->top = 0;
+    S->v = (address_type *)calloc(size, sizeof(address_type));
+    return S;
 }
 
 void free_stack(Stack *S) {
-  free(S->v);
-  free(S);
+    free(S->v);
+    free(S);
 }
 
 int size_stack(Stack *S) { return S->top; }
@@ -68,13 +68,13 @@ int full_stack(Stack *S) { return S->top >= S->max_size; }
 int empty_stack(Stack *S) { return S->top == 0; }
 
 int element_exist_stack(Stack *S, address_type value) {
-  int i;
-  for (i = 0; i < S->top; ++i) {
-    if (value == S->v[i]) {
-      return 1;
+    int i;
+    for (i = 0; i < S->top; ++i) {
+        if (value == S->v[i]) {
+            return 1;
+        }
     }
-  }
-  return 0;
+    return 0;
 }
 
 void reset_stack(Stack *S) { S->top = 0; }

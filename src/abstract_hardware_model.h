@@ -223,6 +223,13 @@ struct CUstream_st;
 extern std::map<void *, void **> pinned_memory;
 extern std::map<void *, size_t> pinned_memory_size;
 
+/**
+ * 包含如下信息：
+ *  - Grid/Block dim的信息
+ *  - the function_info object associated with the kernel entry point
+ *  - launch status
+ *  - param memory： memory allocated for the kernel arguments in param memory
+ */
 class kernel_info_t {
 public:
     //   kernel_info_t()
@@ -321,6 +328,7 @@ private:
     kernel_info_t(const kernel_info_t &);  // disable copy constructor
     void operator=(const kernel_info_t &); // disable copy operator
 
+    /*kernel的entry point */
     class function_info *m_kernel_entry;
 
     unsigned m_uid; // Kernel ID
@@ -372,8 +380,8 @@ public:
 
     mutable bool cache_config_set;
 
-    unsigned m_kernel_TB_latency; // this used for any CPU-GPU kernel latency
-                                  // and counted in the gpu_cycle
+    /*this used for any CPU-GPU kernel latency and counted in the gpu_cycle */
+    unsigned m_kernel_TB_latency;
 };
 
 class core_config {
@@ -583,6 +591,11 @@ private:
     unsigned m_texcache_linesize;
 };
 
+/**
+ * 实现 functional GPU simulator的最顶层的类， Class gpgpu_sim (the top-level
+ * GPU timing simulation model) 会继承该类 拥有actual buffer that implements
+ * global/texture memory spaces
+ */
 class gpgpu_t {
 public:
     gpgpu_t(const gpgpu_functional_sim_config &config, gpgpu_context *ctx);
@@ -604,8 +617,15 @@ public:
      * 准确的停留在gpu_sim_cycle=10的状态,从而查询各个部件的信息
      */
     unsigned long long gpu_sim_cycle;
+
+    /*gpu_tot_sim_cycle是执行当前阶段之前的所有前绪指令的延迟, 比如memcpy等 */
     unsigned long long gpu_tot_sim_cycle;
 
+    /**
+     * 下面用来建模GPU memory managements the simulated GPU memory space
+     * (malloc, memcpy, texture-bindin, ...). 这些函数均在cuda-sim.cc文件中实现
+     * 这些函数被CUDA/OpenCL API implementations实现调用
+     */
     void *gpu_malloc(size_t size);
     void *gpu_mallocarray(size_t count);
     void gpu_memset(size_t dst_start_addr, int c, size_t count);
@@ -675,13 +695,16 @@ public:
     virtual ~gpgpu_t() {}
 
 protected:
+    /*用来解析function sim的配置文件 */
     const gpgpu_functional_sim_config &m_function_model_config;
     FILE *ptx_inst_debug_file;
 
+    /*模拟global memory*/
     class memory_space *m_global_mem;
     class memory_space *m_tex_mem;
     class memory_space *m_surf_mem;
 
+    /*下一个内存分配的起始地址，每次分配完加上size，并且确保对齐 */
     unsigned long long m_dev_malloc;
     //  These maps contain the current texture mappings for the GPU at any given
     //  time.
@@ -694,16 +717,27 @@ protected:
         m_NameToAttribute;
 };
 
+/**
+ * kernel 的PTX分析出的一些参数
+ * Holds properties of the kernel (Kernel's resource use).
+ * These will be set to zero if a ptxinfo file is not present.
+ */
 struct gpgpu_ptx_sim_info {
-    // Holds properties of the kernel (Kernel's resource use).
-    // These will be set to zero if a ptxinfo file is not present.
+    /*local memory大小 */
     int lmem;
+    /*shared memory大小 */
     int smem;
+    /*constant memory大小 */
     int cmem;
+    /*global memory大小 */
     int gmem;
+    /*寄存器数量 */
     int regs;
+    /*最大线程数 */
     unsigned maxthreads;
+    /*PTX version */
     unsigned ptx_version;
+    /*目标 SM id */
     unsigned sm_target;
 };
 
@@ -892,11 +926,11 @@ private:
     /*该次访存操作的唯一 ID*/
     unsigned m_uid;
     /*访存地址*/
-    new_addr_type m_addr; 
+    new_addr_type m_addr;
     /*1-写，0-读*/
     bool m_write;
     /*访存数据大小，以byte为单位*/
-    unsigned m_req_size; 
+    unsigned m_req_size;
     /**
       mem_access_type 定义了在时序模拟器中对不同类型的存储器进行不同的访存类型：
         MA_TUP(GLOBAL_ACC_R), 从 global memory 读
@@ -971,6 +1005,18 @@ struct dram_callback_t {
     class ptx_thread_info *thread;
 };
 
+/**
+ * 建模一条static
+ * instruction和微架构相关的内容，主要包括静态信息，warp_inst_t则表达动态执行中的信息
+ *  inst_t包含：
+ *  - opcode type
+ *  - source and destination register identifiers
+ *  - instruction address
+ *  - instruction size
+ *  - reconvergence point instruction address
+ *  - instruction latency and initiation interval
+ *  - memory operations, the memory space accessed.
+ */
 class inst_t {
 public:
     inst_t() {
@@ -1040,30 +1086,36 @@ public:
     void set_bar_id(unsigned id) { bar_id = id; }
     void set_bar_count(unsigned count) { bar_count = count; }
 
-    address_type pc; // program counter address of instruction
-    unsigned isize;  // size of instruction in bytes
-    op_type op;      // opcode (uarch visible)
+    /*program counter address of instruction */
+    address_type pc;
+    /*size of instruction in bytes */
+    unsigned isize;
+    /*opcode (uarch visible)*/
+    op_type op;
 
     barrier_type bar_type;
     reduction_type red_type;
     unsigned bar_id;
     unsigned bar_count;
 
-    types_of_operands
-        oprnd_type; // code (uarch visible) identify if the
-                    // operation is an interger or a floating point
-    special_ops
-        sp_op; // code (uarch visible) identify if int_alu, fp_alu, int_mul ....
-    operation_pipeline op_pipe; // code (uarch visible) identify the pipeline of
-                                // the operation (SP, SFU or MEM)
-    mem_operation mem_op;       // code (uarch visible) identify memory type
-    bool const_cache_operand;   // has a load from constant memory as an operand
-    _memory_op_t memory_op;     // memory_op used by ptxplus
+    /*code (uarch visible) identify if the operation is an interger or a floating point*/
+    types_of_operands oprnd_type; 
+    /*code (uarch visible) identify if int_alu, fp_alu, int_mul ....*/
+    special_ops sp_op; 
+    /*code (uarch visible) identify the pipeline of the operation (SP, SFU or MEM)*/
+    operation_pipeline op_pipe; 
+    /*code (uarch visible) identify memory type*/
+    mem_operation mem_op;       
+    /* has a load from constant memory as an operand*/
+    bool const_cache_operand;  
+    /*memory_op used by ptxplus*/
+    _memory_op_t memory_op;    
     unsigned num_operands;
-    unsigned num_regs; // count vector operand as one register operand
+    /*count vector operand as one register operand*/
+    unsigned num_regs; 
 
-    address_type reconvergence_pc; // -1 => not a branch, -2 => use function
-                                   // return address
+    /*-1 => not a branch, -2 => use function return address*/
+    address_type reconvergence_pc; 
 
     unsigned out[8];
     unsigned outcount;
@@ -1078,8 +1130,7 @@ public:
         int dst[MAX_REG_OPERANDS];
         int src[MAX_REG_OPERANDS];
     } arch_reg;
-    // int arch_reg[MAX_REG_OPERANDS]; // register number for bank conflict
-    // evaluation
+    // int arch_reg[MAX_REG_OPERANDS]; // register number for bank conflict evaluation
     unsigned latency; // operation latency
     unsigned initiation_interval;
 
@@ -1096,6 +1147,19 @@ enum divergence_support_t { POST_DOMINATOR = 1, NUM_SIMD_MODEL };
 
 const unsigned MAX_ACCESSES_PER_INSN_PER_THREAD = 8;
 
+/**
+ * warp_inst_t主要建模两个功能，主要用于时序仿真:
+ *  1. 包含A dynamic “SIMD” instruction executed by a warp
+    2. 用于issue()阶段后面的Pipeline Register
+ * 继承自warp_inst_t 的每条ptx_instruction在 functional
+ simulation中被填充，然后在时序模拟中
+    ptx_instruction会被down成warp_inst_t从而丢掉不需要的信息
+    包含以下内容：
+        - warp_id
+        - active thread mask inside the warp,
+        - list of memory accesses (mem_access_t)
+        - information of threads inside that warp (per_thread_info)
+ */
 class warp_inst_t : public inst_t {
 public:
     // constructors
@@ -1286,7 +1350,8 @@ protected:
     bool m_empty;
     bool m_cache_hit;
     unsigned long long issue_cycle;
-    unsigned cycles; // used for implementing initiation interval delay
+    /**用于实现initiation interval delay，即在m_dispatch_reg中等待的时间 */
+    unsigned cycles;
     bool m_isatomic;
     bool should_do_atomic;
     bool m_is_printf;
@@ -1318,7 +1383,8 @@ protected:
     bool m_mem_accesses_created;
     std::list<mem_access_t> m_accessq;
 
-    unsigned m_scheduler_id; // the scheduler that issues this inst
+    /**issue这条指令的scheduler id */
+    unsigned m_scheduler_id;
 
     // Jin: cdp support
 public:
@@ -1413,7 +1479,29 @@ protected:
     unsigned reduction_storage[MAX_CTA_PER_SHADER][MAX_BARRIERS_PER_CTA];
 };
 
-// register that can hold multiple instructions.
+/**
+ * register that can hold multiple instructions.
+ * 1个寄存器集合可以包含多条指令，方便模拟，而非真实硬件结构
+ * 核心数据结构是：vector<warp_inst_t *> regs
+ *
+    +--------------------+
+    |   register_set     |
+    +--------------------+
+    | - std::vector<warp_inst_t *> regs | // 存储寄存器集合的向量
+    | - const char *m_name               | // 寄存器集合的名称
+    +--------------------+
+    | + register_set(num, name)          | // 构造函数，初始化寄存器集合
+    | + get_name()                       | // 获取寄存器集合的名称
+    | + has_free()                       | // 检查是否有空寄存器
+    | + has_ready()                      | // 检查是否有非空寄存器准备好
+    | + get_ready_reg_id()              | // 获取一个准备好的寄存器的ID
+    | + move_in(src)                    | // 将指令存入空寄存器
+    | + move_out_to(dest)               | // 将非空寄存器中的指令移出到目标
+    | + print(fp)                        | // 打印寄存器集合的状态
+    | + get_free()                       | // 获取一个空寄存器
+    | + get_size()                       | // 获取寄存器集合的大小
+    +--------------------+
+ */
 class register_set {
 public:
     register_set(unsigned num, const char *name) {
@@ -1478,6 +1566,8 @@ public:
         assert(not regs[reg_id]->empty());
         return regs[reg_id]->get_schd_id();
     }
+
+    /*找到寄存器组中空闲的register，将src中内容的移入空闲的寄存器 */
     void move_in(warp_inst_t *&src) {
         warp_inst_t **free = get_free();
         move_warp(*free, src);

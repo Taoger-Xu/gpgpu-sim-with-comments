@@ -92,6 +92,9 @@ std::list<unsigned> shader_core_ctx::get_regs_written(const inst_t &fvt) const {
     return result;
 }
 
+/**
+ * 初始化在该simt core上执行的所有wrap变量，即m_warp变量
+ */
 void exec_shader_core_ctx::create_shd_warp() {
     m_warp.resize(m_config->max_warps_per_shader);
     for (unsigned k = 0; k < m_config->max_warps_per_shader; ++k) {
@@ -99,6 +102,10 @@ void exec_shader_core_ctx::create_shd_warp() {
     }
 }
 
+/**
+ * 1. 
+ * 2. 初始化fetch()阶段需要的m_last_warp_fetched和m_L1I
+ */
 void shader_core_ctx::create_front_pipeline() {
     // pipeline_stages is the sum of normal pipeline stages and specialized_unit
     // stages * 2 (for ID and EX)
@@ -180,11 +187,17 @@ void shader_core_ctx::create_front_pipeline() {
 #define STRSIZE 1024
     char name[STRSIZE];
     snprintf(name, STRSIZE, "L1I_%03d", m_sid);
+
+    /*初始化L1I cache */
     m_L1I = new read_only_cache(name, m_config->m_L1I_config, m_sid,
                                 get_shader_instruction_cache_id(), m_icnt,
                                 IN_L1I_MISS_QUEUE, OTHER_GPU_CACHE, m_gpu);
 }
 
+/**
+ * 实例化m_scoreboard(Scoreboard)和schedulers
+ * 然后把不同的m_warp（warp_id）分配给不同的scheduler
+ */
 void shader_core_ctx::create_schedulers() {
     m_scoreboard = new Scoreboard(m_sid, m_config->max_warps_per_shader, m_gpu);
 
@@ -914,9 +927,13 @@ exec_shader_core_ctx::get_active_mask(unsigned warp_id, const warp_inst_t *pI) {
 }
 
 /**
- * 
+ * decode()取出m_inst_fetch_buffer流水线寄存器的内容
+ *    1. 调用ptx_fetch_inst(pc)从functional simulator取出simd类型的warp_inst_t指令
+ *    2. 通过调用ibuffer_fill(0, pI1)把指令放入wrap对应的I-buffer entry中，每周期最多至多处理2条指令
+ *    3. 清空m_inst_fetch_buffer流水线寄存器
  */
 void shader_core_ctx::decode() {
+    /*整个decode()函数必须在流水线寄存器有效的时候执行 */
     if (m_inst_fetch_buffer.m_valid) {
         // decode 1 or 2 instructions and place them into ibuffer
         /*从流水线寄存器m_inst_fetch_buffer取出指令的pc*/
@@ -1228,6 +1245,9 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
     m_warp[warp_id]->set_next_pc(next_inst->pc + next_inst->isize);
 }
 
+/**
+ * 
+ */
 void shader_core_ctx::issue() {
     // Ensure fair round robin issu between schedulers
     unsigned j;
@@ -2753,29 +2773,64 @@ pipelined_simd_unit::pipelined_simd_unit(register_set *result_port,
     active_insts_in_pipeline = 0;
 }
 
+/**
+ * m_pipeline_reg的定义：warp_inst_t **m_pipeline_reg;
+ * m_pipeline_reg是流水线寄存器组，其index越小，越靠近流水线的后面
+ * cycle()让每一cycle中流水线中的instruction都前进一步，直到进入m_result_port，其主要功能如下
+ * 1. 如果最后一级寄存器非空，则把m_pipeline_reg[0]寄存器的值移入m_result_port
+ * 2. m_pipeline_reg流水线寄存器的所有指令依次前递，模拟一拍的执行
+ * 3. 如果m_dispatch_reg不空，则将其dispatch到功能流水线开始执行
+    
+    Dispatch Delay：
+    在V100的trace.config文件中：
+        #tensor unit
+        -specialized_unit_3 1,4,8,4,4,TENSOR
+        -trace_opcode_latency_initiation_spec_op_3 8,4      # <latency,initiation>
+
+    在第二行中，它有两个值：8和4。前者是latency，后者是initiation_interval。initiation_interval是调度延迟，
+    latency是模拟流水线延迟。即每间隔initiation_interval都可以向功能单元dispatch指令，指令通过功能单
+    元需要等待周期。此处的start_stage：
+    int start_stage = m_dispatch_reg->latency - m_dispatch_reg->initiation_interval;
+
+    即在V100中，这里spec_op_3类型的指令执行需要8拍，在发射指令后，指令被移入m_dispatch_reg调度寄存器，然后
+    在调度寄存器里等待4拍，这4拍内不允许别的spec_op_3类型指令进入调度寄存器，4拍后，该指令被移入m_pipeline_reg
+    的第8-4=4号槽，然后在m_pipeline_reg中等待4槽->3槽->2槽->1槽共4拍后，该指令被移入EX_WB流水线寄存器
+    通过这样实现每种指令的 throughput和latency建模
+ */
 void pipelined_simd_unit::cycle() {
+    /*把m_pipeline_reg[0]寄存器的值移入m_result_port */
     if (!m_pipeline_reg[0]->empty()) {
         m_result_port->move_in(m_pipeline_reg[0]);
         assert(active_insts_in_pipeline > 0);
+        /*inst通过功能流水线，流水线中的活跃指令数减1 */
         active_insts_in_pipeline--;
     }
+    /*m_pipeline_reg流水线寄存器的所有指令依次前递，模拟一拍的执行，由m_pipeline_reg[stage + 1]--> m_pipeline_reg[stage] */
     if (active_insts_in_pipeline) {
         for (unsigned stage = 0; (stage + 1) < m_pipeline_depth; stage++)
             move_warp(m_pipeline_reg[stage], m_pipeline_reg[stage + 1]);
     }
+    /*m_dispatch_reg不空，则将其dispatch到功能流水线开始执行 */
     if (!m_dispatch_reg->empty()) {
+        /*m_dispatch_reg->dispatch_delay()模拟initiation_interval延迟，即要求指令必须在m_dispatch_reg等待initiation_interval拍 */
         if (!m_dispatch_reg->dispatch_delay()) {
             int start_stage =
                 m_dispatch_reg->latency - m_dispatch_reg->initiation_interval;
+            /**移入对应的dispatch position */
             if (m_pipeline_reg[start_stage]->empty()) {
                 move_warp(m_pipeline_reg[start_stage], m_dispatch_reg);
+                /*指令移入m_pipeline_reg后，流水线中的活跃指令数加1 */
                 active_insts_in_pipeline++;
             }
         }
     }
+    /**m_dispatch_reg的标识占用位图的状态右移一位，模拟一拍的推进 */
     occupied >>= 1;
 }
 
+/**
+ * 把source_reg对应的流水线寄存器的指令移入m_dispatch_reg寄存器
+ */
 void pipelined_simd_unit::issue(register_set &source_reg) {
     // move_warp(m_dispatch_reg,source_reg);
     bool partition_issue =
@@ -4734,12 +4789,16 @@ void opndcoll_rfu_t::collector_unit_t::dispatch() {
         m_src_op[i].reset();
 }
 
+/**
+ * 每一个simt core cluster调用此函数创建n_simt_cores_per_cluster个shader_core_ctx
+ */
 void exec_simt_core_cluster::create_shader_core_ctx() {
     m_core = new shader_core_ctx *[m_config->n_simt_cores_per_cluster];
     for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; i++) {
         unsigned sid = m_config->cid_to_sid(i, m_cluster_id);
         m_core[i] = new exec_shader_core_ctx(m_gpu, this, sid, m_cluster_id,
                                              m_config, m_mem_config, m_stats);
+        /**记录每一个cluster中simt core的执行顺序 */
         m_core_sim_order.push_back(i);
     }
 }

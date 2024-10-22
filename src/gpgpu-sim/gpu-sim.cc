@@ -812,6 +812,9 @@ void increment_x_then_y_then_z(dim3 &i, const dim3 &bound) {
     }
 }
 
+/**
+ * 
+ */
 void gpgpu_sim::launch(kernel_info_t *kinfo) {
     unsigned kernelID = kinfo->get_uid();
     unsigned long long streamID = kinfo->get_streamID();
@@ -862,6 +865,10 @@ bool gpgpu_sim::can_start_kernel() {
     return false;
 }
 
+/**
+ * gpu_max_cta_opt选项是指的是，GPGPU-Sim所能达到最大CTA并发数(0 = no limit)，在配置选项中定义。
+ * gpu_tot_issued_cta即总发出的CTA数量，加上m_total_cta_launched即已经启动的CTA数量（m_config.gpu_max_cta_opt）
+ */
 bool gpgpu_sim::hit_max_cta_count() const {
     if (m_config.gpu_max_cta_opt != 0) {
         if ((gpu_tot_issued_cta + m_total_cta_launched) >=
@@ -881,10 +888,15 @@ bool gpgpu_sim::kernel_more_cta_left(kernel_info_t *kernel) const {
     return false;
 }
 
+/**
+ * 检查当前的gpgpu能否执行更多的CTA
+ */
 bool gpgpu_sim::get_more_cta_left() const {
+    /*如果已达到GPU模拟限制最大的CTA数，则没有剩余的CTA，返回False */
     if (hit_max_cta_count())
         return false;
 
+    /**检查所有kernel，如果kernel自己还可有多余CTA执行，则返回True */
     for (unsigned n = 0; n < m_running_kernels.size(); n++) {
         if (m_running_kernels[n] &&
             !m_running_kernels[n]->no_more_ctas_to_run())
@@ -980,8 +992,13 @@ void gpgpu_sim::stop_all_running_kernels() {
     }
 }
 
+/**
+ * 创建并初始化配置文件中指定的n_simt_clusters个simt core cluster
+ */
 void exec_gpgpu_sim::createSIMTCluster() {
+    /**表示创建一个数组，其中每个元素是一个指向 simt_core_cluster 对象的指针 */
     m_cluster = new simt_core_cluster *[m_shader_config->n_simt_clusters];
+    /*为数组中的每一个simt_core_cluster 对象的指针进行初始胡，即分配内存并赋值给它*/
     for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++)
         m_cluster[i] = new exec_simt_core_cluster(
             this, i, m_shader_config, m_memory_config, m_shader_stats,
@@ -1145,29 +1162,56 @@ void gpgpu_sim::reinit_clock_domains(void) {
     l2_time = 0;
 }
 
+/**
+ * 判断GPGPU-Sim模拟器是否处于活跃状态。
+ */
 bool gpgpu_sim::active() {
+    /**
+     * gpu_max_cycle_opt选项配置：在达到最大周期数后尽早终止GPU模拟。
+     * gpu_tot_sim_cycle是执行当前阶段之前的所有前绪指令的延迟
+     * gpu_sim_cycle是执行当前阶段的指令的延迟，gpgpu_sim::cycle()每过一拍将gpu_sim_cycle++
+     */
     if (m_config.gpu_max_cycle_opt &&
         (gpu_tot_sim_cycle + gpu_sim_cycle) >= m_config.gpu_max_cycle_opt)
         return false;
+    /**
+     * gpu_max_insn_opt选项配置：在达到最大指令数后尽早终止GPU模拟。
+     * gpu_sim_insn是执行当前阶段的指令的总数，比如将各个warp的相加。
+     * gpu_tot_sim_insn是执行当前阶段之前的所有前绪指令的总数
+     */
     if (m_config.gpu_max_insn_opt &&
         (gpu_tot_sim_insn + gpu_sim_insn) >= m_config.gpu_max_insn_opt)
         return false;
+    /**
+     * gpu_max_cta_opt选项配置：GPGPU-Sim所能达到最大CTA并发数尽早终止GPU模拟。
+     * gpu_tot_issued_cta即总发出的CTA数量
+     */
     if (m_config.gpu_max_cta_opt &&
         (gpu_tot_issued_cta >= m_config.gpu_max_cta_opt))
         return false;
+    /**
+     * gpu_max_completed_cta_opt选项配置：在达到最大CTA完成数后尽早终止GPU模拟。
+     * gpu_completed_cta是已经完成的CTA的总数
+     */
     if (m_config.gpu_max_completed_cta_opt &&
         (gpu_completed_cta >= m_config.gpu_max_completed_cta_opt))
         return false;
+    /*gpu_deadlock_detect选项配置：在死锁时停止模拟 */
     if (m_config.gpu_deadlock_detect && gpu_deadlock)
         return false;
     for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++)
         if (m_cluster[i]->get_not_completed() > 0)
             return true;
+    /*fix: correct typo*/
     ;
     for (unsigned i = 0; i < m_memory_config->m_n_mem; i++)
         if (m_memory_partition_unit[i]->busy() > 0)
             return true;
     ;
+    /**
+     * icnt_busy()判断互连网络是否处于Busy状态。有任意一个子网络处于Busy状态便认为
+     * 整个互连网络处于Busy状态
+     */
     if (icnt_busy())
         return true;
     if (get_more_cta_left())
@@ -1175,6 +1219,9 @@ bool gpgpu_sim::active() {
     return false;
 }
 
+/**
+ * 恢复gpgpu_sim的状态数据初始化，开始新的模拟
+ */
 void gpgpu_sim::init() {
     // run a CUDA grid on the GPU microarchitecture simulator
     gpu_sim_cycle = 0;
@@ -2270,6 +2317,10 @@ void shader_core_ctx::dump_warp_state(FILE *fout) const {
         m_warp[w]->print(fout);
 }
 
+/**
+ * cuda-sim.cc中已经实现了功能性的 memcpy_to_gpu() 函数, 即数据拷贝到GPU的显存
+ * 这里在性能模型中实现一遍用于性能模拟
+ */
 void gpgpu_sim::perf_memcpy_to_gpu(size_t dst_start_addr, size_t count) {
     if (m_memory_config->m_perf_sim_memcpy) {
         // if(!m_config.trace_driven_mode)    //in trace-driven mode, CUDA

@@ -99,6 +99,7 @@ void ptx_recognizer::init_instruction_state() {
   init_directive_state();
 }
 
+/* */
 symbol_table *gpgpu_context::init_parser(const char *ptx_filename) {
   g_filename = strdup(ptx_filename);
   if (g_global_allfiles_symbol_table == NULL) {
@@ -112,6 +113,12 @@ symbol_table *gpgpu_context::init_parser(const char *ptx_filename) {
   symbol_table("global",0,g_global_allfiles_symbol_table);
   }*/
 
+/**
+ * ptx_parser_decode.def是通过Makefile生成出来的，
+ * 在src/cuda-sim/Makefile中；通过ptx.l和ptx.y（这两个文件通过flex和bison）生成编译器的前两个步骤scanner和parser
+ * ptx.l：用来解析token
+ * ptx.y：用来read instructions
+ */
 #define DEF(X, Y) g_ptx_token_decode[X] = Y;
 #include "ptx_parser_decode.def"
 #undef DEF

@@ -76,6 +76,8 @@ public:
 
     pthread_mutex_t g_sim_lock;
     bool g_sim_active;
+
+    /**gpgpu-sim时序模拟结束的信号，在GPGPUsim_ctx()构造函数中设置为true */
     bool g_sim_done;
     bool break_limit;
 };

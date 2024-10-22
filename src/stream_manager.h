@@ -220,6 +220,9 @@ private:
     kernel_info_t *m_kernel;
     struct CUevent_st *m_event;
 };
+/**
+ * 对一个单独的cuda stream进行建模
+ */
 struct CUstream_st {
 public:
     CUstream_st();
@@ -238,13 +241,20 @@ private:
     unsigned m_uid;
     static unsigned sm_next_stream_uid;
 
+    /**stream中依次执行的各个operation，比如sync，cuda memcpy，kernel launch等 */
     std::list<stream_operation> m_operations;
-    bool m_pending; // front operation has started but not yet completed
 
-    pthread_mutex_t m_lock; // ensure only one host or gpu manipulates stream
-                            // operation at one time
+    /*front operation has started but not yet completed */
+    bool m_pending; 
+
+    /*ensure only one host or gpu manipulates stream operation at one time */
+    pthread_mutex_t m_lock; 
 };
 
+/**
+ * 实现cuda stream的管理
+ * 
+ */
 class stream_manager {
 public:
     stream_manager(gpgpu_sim *gpu, bool cuda_launch_blocking);
@@ -269,6 +279,7 @@ private:
 
     bool m_cuda_launch_blocking;
     gpgpu_sim *m_gpu;
+    /*不同的cuda stream */
     std::list<CUstream_st *> m_streams;
     std::map<unsigned, CUstream_st *> m_grid_id_to_stream;
     CUstream_st m_stream_zero;

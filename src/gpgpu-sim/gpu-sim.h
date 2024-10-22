@@ -535,6 +535,7 @@ public:
 
     void set_prop(struct cudaDeviceProp *prop);
 
+    /* */
     void launch(kernel_info_t *kinfo);
     bool can_start_kernel();
     unsigned finished_kernel();
@@ -636,7 +637,8 @@ private:
     void gpgpu_debug();
 
 protected:
-    ///// data /////
+
+    /*一个指针数组，每个元素都是一个指向 simt_core_cluster 对象的指针 */
     class simt_core_cluster **m_cluster;
     class memory_partition_unit **m_memory_partition_unit;
     class memory_sub_partition **m_memory_sub_partition;
@@ -654,6 +656,7 @@ protected:
     unsigned m_last_cluster_issue;
     float *average_pipeline_duty_cycle;
     float *active_sms;
+    
     // time of next rising edge
     double core_time;
     double icnt_time;

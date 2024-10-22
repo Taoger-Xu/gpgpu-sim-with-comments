@@ -43,20 +43,27 @@
 static int sg_argc = 3;
 static const char *sg_argv[] = {"", "-config", "gpgpusim.config"};
 
+/**
+ * gpgpu时序模拟的thread，每次至多运行一个kernel，用于opencl的API调用设置g_sim_signal_start触发thread启动
+ */
 void *gpgpu_sim_thread_sequential(void *ctx_ptr) {
     gpgpu_context *ctx = (gpgpu_context *)ctx_ptr;
-    // at most one kernel running at a time
     bool done;
     do {
+        /*g_sim_signal_start 在哪里被设置 ？*/
         sem_wait(&(ctx->the_gpgpusim->g_sim_signal_start));
         done = true;
+        /*当前kernel还有多余的CTA以及当前gpgpu可以运行更多的CTA*/
         if (ctx->the_gpgpusim->g_the_gpu->get_more_cta_left()) {
             done = false;
+            /*每执行一个gpgpu的时序模拟，都要格式化化gpgpu_sim的变量*/
             ctx->the_gpgpusim->g_the_gpu->init();
+            /*g_the_gpu不断的运行cycle()函数运行一个周期 */
             while (ctx->the_gpgpusim->g_the_gpu->active()) {
                 ctx->the_gpgpusim->g_the_gpu->cycle();
                 ctx->the_gpgpusim->g_the_gpu->deadlock_check();
             }
+            /*执行完一个kernel后打印输出的统计数据 */
             ctx->the_gpgpusim->g_the_gpu->print_stats(
                 ctx->the_gpgpusim->g_the_gpu->last_streamID);
             ctx->the_gpgpusim->g_the_gpu->update_stats();
@@ -73,6 +80,9 @@ static void termination_callback() {
     fflush(stdout);
 }
 
+/**
+ * 对于cuda引用，运行gpgpu_sim_thread_concurrent进行时序模拟
+ */
 void *gpgpu_sim_thread_concurrent(void *ctx_ptr) {
     gpgpu_context *ctx = (gpgpu_context *)ctx_ptr;
     atexit(termination_callback);
@@ -98,6 +108,7 @@ void *gpgpu_sim_thread_concurrent(void *ctx_ptr) {
         pthread_mutex_unlock(&(ctx->the_gpgpusim->g_sim_lock));
         bool active = false;
         bool sim_cycles = false;
+        /*统计数据初始化, 开始新的时序模拟 */
         ctx->the_gpgpusim->g_the_gpu->init();
         do {
             // check if a kernel has completed
@@ -142,6 +153,8 @@ void *gpgpu_sim_thread_concurrent(void *ctx_ptr) {
                      !(ctx->the_gpgpusim->g_stream_manager->empty_protected());
 
         } while (active && !ctx->the_gpgpusim->g_sim_done);
+
+        /** */
         if (g_debug_execution >= 3) {
             printf("GPGPU-Sim: ** STOP simulation thread (no work) **\n");
             fflush(stdout);
@@ -157,6 +170,7 @@ void *gpgpu_sim_thread_concurrent(void *ctx_ptr) {
         pthread_mutex_unlock(&(ctx->the_gpgpusim->g_sim_lock));
     } while (!ctx->the_gpgpusim->g_sim_done);
 
+    /**时序模拟结束 */
     printf("GPGPU-Sim: *** simulation thread exiting ***\n");
     fflush(stdout);
 
@@ -286,6 +300,9 @@ void gpgpu_context::print_simulation_time() {
     fflush(stdout);
 }
 
+/**
+ * 设置g_sim_signal_start信号开始gpgpu-sim的时序模拟
+ */
 int gpgpu_context::gpgpu_opencl_ptx_sim_main_perf(kernel_info_t *grid) {
     the_gpgpusim->g_the_gpu->launch(grid);
     sem_post(&(the_gpgpusim->g_sim_signal_start));

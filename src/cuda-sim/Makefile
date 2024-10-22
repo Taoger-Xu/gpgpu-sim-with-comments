@@ -78,6 +78,7 @@ depend:
 libgpgpu_ptx_sim.a: $(OBJS) 
 	ar rcs $(OUTPUT_DIR)/libgpgpu_ptx_sim.a $(OUTPUT_DIR)/ptx.tab.o $(OUTPUT_DIR)/lex.ptx_.o $(OUTPUT_DIR)/ptxinfo.tab.o $(OUTPUT_DIR)/lex.ptxinfo_.o $(OBJS)
 
+# 生成编译器的前两个步骤scanner和parser，最终生成ptx_parser_decode.def文件
 $(OUTPUT_DIR)/ptx.tab.o: $(OUTPUT_DIR)/ptx.tab.c
 	$(CPP) -c $(CXX_OPT) -DYYDEBUG $(OUTPUT_DIR)/ptx.tab.c -o $(OUTPUT_DIR)/ptx.tab.o
 
@@ -127,6 +128,7 @@ $(OUTPUT_DIR)/instructions.h: instructions.cc
 	@chmod -w $*.h
 	@echo "created $(OUTPUT_DIR)/instructions.h"
 
+# ptx_parser_decode.def通过ptx.tab.c在Makefile中生成出来 
 $(OUTPUT_DIR)/ptx_parser_decode.def: $(OUTPUT_DIR)/ptx.tab.c
 ifeq ($(shell uname),Linux)
 	cat $(OUTPUT_DIR)/ptx.tab.h | grep "=" | sed 's/^[ ]\+//' | sed -E 's/\s+\/\*.+\*\///' | sed 's/[=,]//g' | sed 's/\([_A-Z1-9]\+\)[ ]\+\([0-9]\+\)/\1 \1/' | sed 's/^/DEF(/' | sed 's/ /,"/' | sed 's/$$/")/' | sed '/YYerror/d;/YYEOF/d;/YYEMPTY/d;/YYUNDEF/d;'> $(OUTPUT_DIR)/ptx_parser_decode.def

@@ -198,8 +198,7 @@ void register_ptx_function(const char *name, function_info *impl) {
 #endif
 
 /**
- * 任何first CUDA/OpenCL API
- * call都会调用GPGPUSim_Init()对整个gpgpusim进行初始化，主要包括两种方式触发:
+ * 任何first CUDA/OpenCL API call都会调用GPGPUSim_Init()对整个gpgpusim进行初始化，主要包括两种方式触发:
  *  - 直接调用GPGPUSim_Init()
  *  - 通过GPGPUSim_Context()间接调用
  * 通过start_sim_thread函数开启新的线程进行timing model模拟
@@ -214,6 +213,7 @@ struct _cuda_device_id *gpgpu_context::GPGPUSim_Init() {
          */
         gpgpu_sim *the_gpu = gpgpu_ptx_sim_init_perf();
 
+        /**将cudaDeviceProp类型的变量通过calloc申请出来；将硬件的配置参数设置到这个变量上去 */
         cudaDeviceProp *prop =
             (cudaDeviceProp *)calloc(sizeof(cudaDeviceProp), 1);
         snprintf(prop->name, 256, "GPGPU-Sim_v%s", g_gpgpusim_version_string);
@@ -261,6 +261,7 @@ struct _cuda_device_id *gpgpu_context::GPGPUSim_Init() {
     /**
      * 通过调用gpgpusim_entrypoint.cc中的start_sim_thread()-->gpgpu_sim_thread_sequential()开启一个线程进行真正的模拟
      * 这个线程创建后等待g_sim_signal_start信号，然后开始进行gpgpu模拟
+     * 根据送进去的是1还是0子线程调用gpgpu_sim_thread_concurrent或者gpgpu_sim_thread_sequential
      */
     start_sim_thread(1);
     return the_device;
@@ -614,14 +615,26 @@ __host__ cudaError_t CUDARTAPI cudaDeviceGetLimitInternal(
 
 /**
  * __cudaRegisterFatBinary在GPGPU-sim中的具体实现：
- * 1. 通过调用GPGPU_Context()间接初始化整个模拟器, gpgpu_context是最顶层的类
+ * 1. 通过调用GPGPU_Context()间接初始化整个模拟器, 生成出一个gpgpu_context的singleton，gpgpu_context是最顶层的类；
+ * 2. 在gpgpu_context的构造函数中分别初始化了以下几个class的instance:
+ *    cuda_runtime_api(api)
+ *    ptxinfo_data(ptxinfo)
+ *    ptx_recognizer(ptx_parser)
+ *    GPGPUsim_ctx(the_gpgpusim)
+ *    cuda_sim(func_sim)
+ *    cuda_device_runtime(device_runtime)
+ *    ptx_stats(stats)
+ * 3. 完成初始化后通过ctx->api->cuobjdumpInit()调用工具包cuobjdump完成从binary到ptx指令的加载，并且形成.ptx文件
+ * 4. 
  */
 void **cudaRegisterFatBinaryInternal(void *fatCubin,
                                      gpgpu_context *gpgpu_ctx = NULL) {
+    /*确保全局只有一个单例gpgpu_ctx */
     gpgpu_context *ctx;
     if (gpgpu_ctx) {
         ctx = gpgpu_ctx;
     } else {
+        /*GPGPU_Context()构造新的已经初始化的gpgpu_context*/
         ctx = GPGPU_Context();
     }
     if (g_debug_execution >= 3) {
@@ -633,8 +646,13 @@ void **cudaRegisterFatBinaryInternal(void *fatCubin,
            "higher\n");
     exit(1);
 #endif
+    /*完成全局唯一的gpgpu_context的初始化 */
+    /*GPGPUSim_Context()间接调用 GPGPUSim_Init()完成整个gpgpu-sim的初始化*/
     CUctx_st *context = GPGPUSim_Context(ctx);
     static unsigned next_fat_bin_handle = 1;
+    /**
+     * 需要从可执行文件中提取PTX指令，在模拟器内部可以使用nvidia提供的工具包cuobjdump[CUDA 4.0(later)]
+     */
     if (context->get_device()->get_gpgpu()->get_config().use_cuobjdump()) {
         // The following workaround has only been verified on 64-bit systems.
         if (sizeof(void *) == 4)
@@ -702,9 +720,15 @@ void **cudaRegisterFatBinaryInternal(void *fatCubin,
          * This function extracts all data from all files in first call
          * then for next calls, only returns the appropriate number
          */
+        /**
+         * 
+         */
         assert(fat_cubin_handle >= 1);
+        /*使用cuobjdump完成load ptx */
         if (fat_cubin_handle == 1)
             ctx->api->cuobjdumpInit();
+        
+        /*使用parser解析PTX指令*/
         ctx->api->cuobjdumpRegisterFatBinary(fat_cubin_handle, filename,
                                              context);
 
@@ -808,6 +832,7 @@ void cudaRegisterFunctionInternal(void **fatCubinHandle, const char *hostFun,
                                   int thread_limit, uint3 *tid, uint3 *bid,
                                   dim3 *bDim, dim3 *gDim,
                                   gpgpu_context *gpgpu_ctx = NULL) {
+    /**实例化全局唯一的gpgpu_context */
     gpgpu_context *ctx;
     if (gpgpu_ctx) {
         ctx = gpgpu_ctx;
@@ -825,6 +850,9 @@ void cudaRegisterFunctionInternal(void **fatCubinHandle, const char *hostFun,
     /**
      * cuobjdump is a tool provided by NVidia along with the toolkit that can extract the PTX,
      * SASS as well as other information from the executable
+     */
+    /**
+     * 通过ctx->cuobjdumpParseBinary()去初始化parser去解析PTX指令
      */
     if (context->get_device()->get_gpgpu()->get_config().use_cuobjdump())
         ctx->cuobjdumpParseBinary(fat_cubin_handle);
@@ -966,6 +994,11 @@ cudaError_t cudaSetupArgumentInternal(const void *arg, size_t size,
     return g_last_cudaError = cudaSuccess;
 }
 
+/**
+ * 在cudaLaunchInternal中，一个重要的工作的是找出reconvergence point， 编译器的很多优化首先是组成很多basic block;
+ * amd或者nvidia的架构中以wavefront或者warp来做lock step的执行，
+ * 如果存在if else 就会出现thread divergence; 通过找出reconvergence point 就知道了什么时候warp内部的thread又汇合在一起执行
+ */
 cudaError_t cudaLaunchInternal(const char *hostFun,
                                gpgpu_context *gpgpu_ctx = NULL) {
     gpgpu_context *ctx;
@@ -3059,6 +3092,10 @@ __host__ cudaError_t CUDARTAPI cudaGetExportTable(
 
 // extracts all ptx files from binary and dumps into
 // prog_name.unique_no.sm_<>.ptx files
+/**
+ * 从binary文件中解析出PTX文件并且dump为prog_name.unique_no.sm_<>.ptx files
+ * 
+ */
 void cuda_runtime_api::extract_ptx_files_using_cuobjdump(CUctx_st *context) {
     char command[1000];
     char *pytorch_bin = getenv("PYTORCH_BIN");
@@ -3139,6 +3176,10 @@ void cuda_runtime_api::extract_ptx_files_using_cuobjdump(CUctx_st *context) {
  *with each binary in its own file It is also responsible for extracting the
  *libraries linked to the binary if the option is enabled
  * */
+/**
+ * 调用cuobjdump to extract everything，比如ELF各式，sass指令，ptx指令
+ * 其中调用extract_ptx_files_using_cuobjdump()解析PTX指令
+ */
 void cuda_runtime_api::extract_code_using_cuobjdump() {
     CUctx_st *context = GPGPUSim_Context(gpgpu_ctx);
 
@@ -3160,6 +3201,7 @@ void cuda_runtime_api::extract_code_using_cuobjdump() {
     // used by ptxas.
     int result = 0;
 #if (CUDART_VERSION >= 6000)
+    /**loading PTX */
     extract_ptx_files_using_cuobjdump(context);
     return;
 #endif
@@ -3552,11 +3594,13 @@ cuda_runtime_api::findPTXSection(const std::string identifier) {
     return NULL;
 }
 
-//! Extract the code using cuobjdump and remove unnecessary sections
+/**
+ * Extract the code using cuobjdump and remove unnecessary sections
+ */
 void cuda_runtime_api::cuobjdumpInit() {
     CUctx_st *context = GPGPUSim_Context(gpgpu_ctx);
-    extract_code_using_cuobjdump(); // extract all the output of cuobjdump to
-                                    // _cuobjdump_*.*
+    /*extract all the output of cuobjdump to _cuobjdump_*.**/
+    extract_code_using_cuobjdump(); 
     const char *pre_load = getenv("CUOBJDUMP_SIM_FILE");
     if (pre_load == NULL || strlen(pre_load) == 0) {
         cuobjdumpSectionList = pruneSectionList(context);
@@ -3565,6 +3609,9 @@ void cuda_runtime_api::cuobjdumpInit() {
 }
 
 //! Either submit PTX for simulation or convert SASS to PTXPlus and submit it
+/**
+ * 主要调用gpgpu_ptx_sim_load_ptx_from_filename()去初始化parser
+ */
 void gpgpu_context::cuobjdumpParseBinary(unsigned int handle) {
     CUctx_st *context = GPGPUSim_Context(this);
     if (api->fatbin_registered[handle])

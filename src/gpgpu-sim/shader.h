@@ -101,9 +101,10 @@ public:
 };
 
 /**
- * shd_warp_t主要建模:
+ * shd_warp_t主要建模完成decode()后wrap的状态信息:
  *  - 一个wrap的时序状态
  *  - 一个wrap拥有的I-Buffer
+ * 同时shd_warp_t拥有一堆flags标志该wrap能否被issue()
  */
 class shd_warp_t {
 public:
@@ -387,6 +388,9 @@ enum concrete_scheduler {
     NUM_CONCRETE_SCHEDULERS
 };
 
+/**
+ * 
+ */
 class scheduler_unit { // this can be copied freely, so can be used in std
                        // containers.
 public:
@@ -1132,6 +1136,11 @@ struct ifetch_buffer_t {
 
 class shader_core_config;
 
+/**
+ * 所有功能单元的基类，主要提供虚函数：
+ *      issue(register_set &source_reg)：把source_reg的内容移动到m_dispatch_reg
+ *      cycle()
+ */
 class simd_function_unit {
 public:
     simd_function_unit(const shader_core_config *config);
@@ -1144,6 +1153,11 @@ public:
 
     // accessors
     virtual unsigned clock_multiplier() const { return 1; }
+    /**
+     * 判断当前指令能否进入到simd单元进行流水线执行，满足下面两个条件：
+     * m_dispatch_reg为空
+     * 对应的流水线寄存器不占用
+     */
     virtual bool can_issue(const warp_inst_t &inst) const {
         return m_dispatch_reg->empty() && !occupied.test(inst.latency);
     }
@@ -1157,13 +1171,32 @@ public:
     const char *get_name() { return m_name.c_str(); }
 
 protected:
+    /*存储该SIMD功能单元的名称*/
     std::string m_name;
+    /*参数配置*/
     const shader_core_config *m_config;
+    /*simd的issue()函数把流水线寄存器中的指令移动到m_dispatch_reg等待initiation_interval个周期，模拟throughput */
     warp_inst_t *m_dispatch_reg;
+    /*最长的ALU指令的延迟，即流水线寄存器级数至多有512 */
     static const unsigned MAX_ALU_LATENCY = 512;
+    /*标识流水线的每一级是否被占用 */
     std::bitset<MAX_ALU_LATENCY> occupied;
 };
 
+/**
+ * sp_unit和sfu等class通过重写can_issue() 方法来确定不同功能单元执行的指令类型
+ * SP unit通过OC_EX_SP pipeline register与operation collector unit相连;
+    SFU unit 通过OC_EX_SFU pipeline register与operand collector unit相连
+    1.issue进入m_dispatch_reg后在其中等待initiation_interval个周期，在此期间没有指令可以issue()到该功能单元
+      在m_dispatch_reg的wait建模throughput of the instruction
+    
+    2. wait结束后该指令被dispatch到m_pipeline_reg用于latency modelling，同时dispatching position也被确定， 
+       即 Dispatch position = Latency - Issue_interval，因为latency包括在m_dispatch_reg等待的时间
+
+    3. 每一个周期执行一次cycle()流水线单元向前推进一拍，直到到达 m_result_port，这是SP和SFU units之间
+       共享的与write back阶段的pipeline register
+    每种指令的throughput和latency在cuda-sim.cc中的ptx_instruction::set_opcode_and_latency()指定
+ */
 class pipelined_simd_unit : public simd_function_unit {
 public:
     pipelined_simd_unit(register_set *result_port,
@@ -1171,7 +1204,9 @@ public:
                         shader_core_ctx *core, unsigned issue_reg_id);
 
     // modifiers
+    /*流水线单元向前推进一拍，模拟指令的bandwidth和latency */
     virtual void cycle();
+    /*把source_reg对应的流水线寄存器的指令移入m_dispatch_reg寄存器 */
     virtual void issue(register_set &source_reg);
     virtual unsigned get_active_lanes_in_pipeline();
 
@@ -1202,8 +1237,11 @@ public:
     }
 
 protected:
+    /*流水线寄存器的个数 */
     unsigned m_pipeline_depth;
+    /*index越小，越靠近流水线的结束*/
     warp_inst_t **m_pipeline_reg;
+    /*流水线结束的结果寄存器 */
     register_set *m_result_port;
     class shader_core_ctx *m_core;
     unsigned m_issue_reg_id; // if sub_core_model is enabled we can only issue
@@ -1302,6 +1340,10 @@ public:
     bool is_issue_partitioned() { return true; }
 };
 
+/**
+ * SP unit通过OC_EX_SP pipeline register与operation collector unit相连
+ * SP 执行各种类型的ALU instructions 
+ */
 class sp_unit : public pipelined_simd_unit {
 public:
     sp_unit(register_set *result_port, const shader_core_config *config,
@@ -1357,6 +1399,15 @@ class shader_memory_interface;
 class shader_core_mem_fetch_allocator;
 class cache_t;
 
+/**
+ * Instantiates and operates on all in-core memories
+    – Texture cache: m_L1T
+    – Constant cache: m_L1C
+    – Data cache: m_L1D
+    – Shared memory: m_pipeline_reg
+ * Off-core interface: m_icnt
+ * Mem_fetch allocator: m_mf_allocator
+ */
 class ldst_unit : public pipelined_simd_unit {
 public:
     ldst_unit(mem_fetch_interface *icnt,
@@ -2596,11 +2647,13 @@ protected:
     mem_fetch_interface *m_icnt;
     shader_core_mem_fetch_allocator *m_mem_fetch_allocator;
 
-    // fetch
-    read_only_cache *m_L1I; // instruction cache
+    // 下面是fetch()阶段涉及的组件，在create_front_pipeline()进行分配以及初始化
+    /*instruction cache*/
+    read_only_cache *m_L1I; 
     int m_last_warp_fetched;
 
-    // decode/dispatch
+    // 下面是decode/dispatch阶段涉及的组件
+    /*在该simt core执行的所有wrap的信息 */
     std::vector<shd_warp_t *> m_warp; // per warp information array
     barrier_set_t m_barriers;
 
@@ -2659,8 +2712,12 @@ private:
     std::map<unsigned int, unsigned int> m_occupied_cta_to_hwtid;
 };
 
+/**
+ * exec_shader_core_ctx用来建模完成初始化后的simt core
+ */
 class exec_shader_core_ctx : public shader_core_ctx {
 public:
+    /**simt core的构造函数 */
     exec_shader_core_ctx(class gpgpu_sim *gpu, class simt_core_cluster *cluster,
                          unsigned shader_id, unsigned tpc_id,
                          const shader_core_config *config,
@@ -2668,9 +2725,13 @@ public:
                          shader_core_stats *stats)
         : shader_core_ctx(gpu, cluster, shader_id, tpc_id, config, mem_config,
                           stats) {
+        /*定义了m_pipeline_reg，shader_core_mem_fetch_allocator, read_only_cache(L1 instruction)*/
         create_front_pipeline();
+        /*初始化m_wrap变量 */
         create_shd_warp();
+        /*实例化m_scoreboard(Scoreboard)和schedulers，把wrap按一定策略分配给不同的scheduler负责 */
         create_schedulers();
+        /*设置operand collector */
         create_exec_pipeline();
     }
 
@@ -2748,16 +2809,21 @@ protected:
     const shader_core_config *m_config;
     shader_core_stats *m_stats;
     memory_stats_t *m_memory_stats;
+    /**一个指针数组，每个元素都是一个指向 shader_core_ctx 对象的指针 */
     shader_core_ctx **m_core;
     const memory_config *m_mem_config;
 
     unsigned m_cta_issue_next_core;
+    /*记录每一个cluster中为每一个simt core执行cycle()函数的顺序
+    在create_shader_core_ctx()函数中初始化 */
     std::list<unsigned> m_core_sim_order;
     std::list<mem_fetch *> m_response_fifo;
 };
 
 class exec_simt_core_cluster : public simt_core_cluster {
 public:
+    /*exec_simt_core_cluster的构造函数，调用create_shader_core_ctx()创建
+    n_simt_cores_per_cluster个shader_core_ctx*/
     exec_simt_core_cluster(class gpgpu_sim *gpu, unsigned cluster_id,
                            const shader_core_config *config,
                            const memory_config *mem_config,

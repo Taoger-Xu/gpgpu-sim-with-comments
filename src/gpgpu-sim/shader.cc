@@ -3811,37 +3811,65 @@ void shader_core_ctx::display_pipeline(FILE *fout, int print_mem,
     }
 }
 
+/**
+ * 计算一个simt core可以并发调度的CTA数量，由CTA中thread的数量，每一个thread的register usage， shared memory usage
+ * 以及配置文件指定的最大maximum number of thread blocks决定
+ */
 unsigned int shader_core_config::max_cta(const kernel_info_t &k) const {
+    /*程序指定的一个cta中thread的数量 */
     unsigned threads_per_cta = k.threads_per_cta();
     const class function_info *kernel = k.entry();
     unsigned int padded_cta_size = threads_per_cta;
+
+    /*一个cta中thread数量为wrap的整数倍 */
     if (padded_cta_size % warp_size)
         padded_cta_size = ((padded_cta_size / warp_size) + 1) * (warp_size);
-
     // Limit by n_threads/shader
+    /**
+     * n_thread_per_shader是一个simt core可以并发运行的最大thread数量，配置选项
+     * n_thread_per_shader是 -gpgpu_shader_core_pipeline 选项中的第一个值，第二个值是 warp_size。例如
+     * 在V100中的 -gpgpu_shader_core_pipeline 2048:32，即一个Shader Core（SM）中实现的是最大 64 warps/SM，
+     * 即一个 Shader Core（SM）中实现的最大可并发线程数量是 2048
+     */
     unsigned int result_thread = n_thread_per_shader / padded_cta_size;
 
+    /**
+     * gpgpu_ptx_sim_info是kernel 的PTX分析出的一些参数，包含shared memory大小，寄存器数量等
+     */
     const struct gpgpu_ptx_sim_info *kernel_info = ptx_sim_kernel_info(kernel);
 
     // Limit by shmem/shader
     unsigned int result_shmem = (unsigned)-1;
+    
+    /**
+     * gpgpu_shmem_size为每个SIMT Core（也称为Shader Core，SM）的共享存储大小，配置选项
+     * 由于单个SM内每分配一个CTA，则要求每个CTA具有独立的相同大小的shared memory，
+     */
     if (kernel_info->smem > 0)
         result_shmem = gpgpu_shmem_size / kernel_info->smem;
 
     // Limit by register count, rounded up to multiple of 4.
+    /**
+     * gpgpu_shader_registers是每个Shader Core的寄存器数，配置选项
+     */
     unsigned int result_regs = (unsigned)-1;
     if (kernel_info->regs > 0)
         result_regs = gpgpu_shader_registers /
                       (padded_cta_size * ((kernel_info->regs + 3) & ~3));
 
     // Limit by CTA
+    /**
+     * max_cta_per_core是由硬件配置的SM内的最大可并发CTA数量，配置选项
+     */
     unsigned int result_cta = max_cta_per_core;
 
+    /*取多重限制的最小值*/
     unsigned result = result_thread;
     result = gs_min2(result, result_shmem);
     result = gs_min2(result, result_regs);
     result = gs_min2(result, result_cta);
 
+    /**判断当前simt core执行的kernel是否发生变化，发生改变则打印出当前kernel的信息 */
     static const struct gpgpu_ptx_sim_info *last_kinfo = NULL;
     if (last_kinfo !=
         kernel_info) { // Only print out stats if kernel_info struct changes
@@ -3860,6 +3888,11 @@ unsigned int shader_core_config::max_cta(const kernel_info_t &k) const {
 
     // gpu_max_cta_per_shader is limited by number of CTAs if not enough to keep
     // all cores busy
+    /**
+     * k.num_blocks()计算kernel对应的需要运行的CTA总的数量
+     * result * num_shader()：result是一个SM运行的最大的CTA数量，num_shader()是SM的数量
+     * 即如果kernel对应的CTA数量不足以让所有SM处于忙碌状态，则把kernel平均分配到所有SM上
+     */
     if (k.num_blocks() < result * num_shader()) {
         result = k.num_blocks() / num_shader();
         if (k.num_blocks() % num_shader())
@@ -4316,6 +4349,9 @@ bool shader_core_ctx::warp_waiting_at_mem_barrier(unsigned warp_id) {
     return true;
 }
 
+/**
+ * 设置成员变量：kernel_max_cta_per_shader
+ */
 void shader_core_ctx::set_max_cta(const kernel_info_t &kernel) {
     // calculate the max cta count and cta size for local memory address mapping
     kernel_max_cta_per_shader = m_config->max_cta(kernel);
@@ -4881,22 +4917,33 @@ unsigned simt_core_cluster::get_n_active_sms() const {
     return n;
 }
 
+/**
+ * 轮询cluster上所有的simt core，
+ */
 unsigned simt_core_cluster::issue_block2core() {
     unsigned num_blocks_issued = 0;
+    /*轮询simt core */
     for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; i++) {
-        unsigned core = (i + m_cta_issue_next_core + 1) %
-                        m_config->n_simt_cores_per_cluster;
+        /*core是simt core的id */
+        unsigned core = (i + m_cta_issue_next_core + 1) % m_config->n_simt_cores_per_cluster;
 
         kernel_info_t *kernel;
         // Jin: fetch kernel according to concurrent kernel setting
-        if (m_config->gpgpu_concurrent_kernel_sm) { // concurrent kernel on sm
+        if (m_config->gpgpu_concurrent_kernel_sm) { 
+            // concurrent kernel on sm
             // always select latest issued kernel
             kernel_info_t *k = m_gpu->select_kernel();
             kernel = k;
         } else {
             // first select core kernel, if no more cta, get a new kernel
             // only when core completes
+            /**
+             * 首先得到运行在当前simt core的kernel函数，并且判断这个kernel是否还能接着在gpgpu-sim上运行。
+             * 不能的话则什么都不做
+             * 否则等待该kernel所有的cta
+             */
             kernel = m_core[core]->get_kernel();
+            /* */
             if (!m_gpu->kernel_more_cta_left(kernel)) {
                 // wait till current kernel finishes
                 if (m_core[core]->get_not_completed() == 0) {
@@ -4918,6 +4965,7 @@ unsigned simt_core_cluster::issue_block2core() {
             break;
         }
     }
+
     return num_blocks_issued;
 }
 

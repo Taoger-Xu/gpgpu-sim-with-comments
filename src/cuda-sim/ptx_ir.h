@@ -1288,7 +1288,9 @@ private:
 };
 
 /**
- * 每一个PTX指令对应在function_info对象中
+ * 每一个PTX function都对应一个function_info,这些PTX function要么是kernel entry point,要么是可以被call的subroutines
+ * 包含a list of static PTX instructions (ptx_instruction's) that can be functionally simulated.
+ * 对于kernel entry points, 存储each of the kernel arguments在map：m_ptx_kernel_param_info中
  */
 class function_info {
 public:
@@ -1443,13 +1445,16 @@ private:
     unsigned m_local_mem_framesize;
     bool m_entry_point;
     bool m_extern;
+    /*用于表示GPGPU-Sim内核是否已经完成编译和装配。如果内核已经完成编译和装配，则m_assembled变量的值为true */
     bool m_assembled;
     bool pdom_done; // flag to check whether pdom is completed or not
+    /*m_name是由nvcc编译器编译后的PTX指令中为内核函数指定的唯一的函数名*/
     std::string m_name;
     ptx_instruction **m_instr_mem;
     unsigned m_start_PC;
     unsigned m_instr_mem_size;
     std::map<std::string, param_t> m_kernel_params;
+    /**存储每一个kernel arguments */
     std::map<unsigned, param_info> m_ptx_kernel_param_info;
     std::vector<std::pair<size_t, unsigned>> m_param_configs;
     const symbol *m_return_var_sym;

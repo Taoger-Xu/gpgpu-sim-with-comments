@@ -36,15 +36,15 @@ typedef class OptionParser *option_parser_t;
 
 // data type of the option
 enum option_dtype {
-  OPT_INT32,
-  OPT_UINT32,
-  OPT_INT64,
-  OPT_UINT64,
-  OPT_BOOL,
-  OPT_FLOAT,
-  OPT_DOUBLE,
-  OPT_CHAR,
-  OPT_CSTR
+    OPT_INT32,
+    OPT_UINT32,
+    OPT_INT64,
+    OPT_UINT64,
+    OPT_BOOL,
+    OPT_FLOAT,
+    OPT_DOUBLE,
+    OPT_CHAR,
+    OPT_CSTR
 };
 
 // create and destroy option parser

@@ -201,6 +201,9 @@ void ptx_recognizer::add_directive() {
 
 #define mymax(a, b) ((a) > (b) ? (a) : (b))
 
+/**
+ * 通过gpgpu_ptx_assemble函数进一步调用function_info::ptx_assemble()
+ */
 void ptx_recognizer::end_function() {
   PTX_PARSE_DPRINTF("end_function");
 

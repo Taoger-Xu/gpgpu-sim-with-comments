@@ -1608,6 +1608,9 @@ std::string function_info::get_insn_str(unsigned pc) const {
     }
 }
 
+/**
+ * 对function_info::ptx_assemble()的封装，被
+ */
 void gpgpu_ptx_assemble(std::string kname, void *kinfo) {
     function_info *func_info = (function_info *)kinfo;
     if ((function_info *)kinfo == NULL) {

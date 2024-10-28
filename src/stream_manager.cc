@@ -64,6 +64,9 @@ void CUstream_st::synchronize() {
     } while (!done);
 }
 
+/**
+ * 向cuda stream添加新的operation
+ */
 void CUstream_st::push(const stream_operation &op) {
     // called by host thread
     pthread_mutex_lock(&m_lock);
@@ -71,6 +74,9 @@ void CUstream_st::push(const stream_operation &op) {
     pthread_mutex_unlock(&m_lock);
 }
 
+/**
+ * cuda stream中弹出一个operation，并且设置m_pending=false
+ */
 void CUstream_st::record_next_done() {
     // called by gpu thread
     pthread_mutex_lock(&m_lock);
@@ -80,6 +86,9 @@ void CUstream_st::record_next_done() {
     pthread_mutex_unlock(&m_lock);
 }
 
+/**
+ * 返回一个stream_operation，并且设置m_pending = true表示当前operation等待执行
+ */
 stream_operation CUstream_st::next() {
     // called by gpu thread
     pthread_mutex_lock(&m_lock);
@@ -111,13 +120,19 @@ void CUstream_st::print(FILE *fp) {
     pthread_mutex_unlock(&m_lock);
 }
 
+/**
+ * 根据operation的type执行function sim或者 performance sim
+ * 如果该operation成功执行则返回true，否则返回false
+ */
 bool stream_operation::do_operation(gpgpu_sim *gpu) {
+    /*空操作直接返回 */
     if (is_noop())
         return true;
-
+    
     assert(!m_done && m_stream);
     if (g_debug_execution >= 3)
         printf("GPGPU-Sim API: stream %u performing ", m_stream->get_uid());
+    /*根据operation执行不同的gpgpu-sim模拟命令 */
     switch (m_type) {
     case stream_memcpy_host_to_device:
         if (g_debug_execution >= 3)
@@ -153,15 +168,18 @@ bool stream_operation::do_operation(gpgpu_sim *gpu) {
         m_stream->record_next_done();
         break;
     case stream_kernel_launch:
+        /*cudaLaunch()*/
         if (m_sim_mode) { // Functional Sim
             if (g_debug_execution >= 3) {
                 printf("kernel %d: \'%s\' transfer to GPU hardware scheduler\n",
                        m_kernel->get_uid(), m_kernel->name().c_str());
                 m_kernel->print_parent_info();
             }
+            /*设置function simulation对应的kernel信息*/
             gpu->set_cache_config(m_kernel->name());
             gpu->functional_launch(m_kernel);
-        } else { // Performance Sim
+        } 
+        else { // Performance Sim
             if (gpu->can_start_kernel() && m_kernel->m_launch_latency == 0) {
                 if (g_debug_execution >= 3) {
                     printf("kernel %d: \'%s\' transfer to GPU hardware "
@@ -169,9 +187,11 @@ bool stream_operation::do_operation(gpgpu_sim *gpu) {
                            m_kernel->get_uid(), m_kernel->name().c_str());
                     m_kernel->print_parent_info();
                 }
+                /*设置Performance simulation对应的kernel信息*/
                 gpu->set_cache_config(m_kernel->name());
                 gpu->launch(m_kernel);
             } else {
+                /*模拟kernel从CPU传输到GPU的延迟 */
                 if (m_kernel->m_launch_latency)
                     m_kernel->m_launch_latency--;
                 if (g_debug_execution >= 3)
@@ -241,6 +261,7 @@ void stream_operation::print(FILE *fp) const {
     }
 }
 
+
 stream_manager::stream_manager(gpgpu_sim *gpu, bool cuda_launch_blocking) {
     m_gpu = gpu;
     m_service_stream_zero = false;
@@ -249,12 +270,18 @@ stream_manager::stream_manager(gpgpu_sim *gpu, bool cuda_launch_blocking) {
     m_last_stream = m_streams.begin();
 }
 
+/**
+ * stream_manager弹出一个operation尝试去完成进行function or performance sim前的准备，即注册要模拟的kernel信息
+ * 这里传入的sim变量未用到，返回的值为是否之前已经已经完成的kernel
+ */
 bool stream_manager::operation(bool *sim) {
     bool check = check_finished_kernel();
     pthread_mutex_lock(&m_lock);
     //    if(check)m_gpu->print_stats();
+    /*弹出一个operation*/
     stream_operation op = front();
-    if (!op.do_operation(m_gpu)) // not ready to execute
+    /*对该operation执行func or timing sim，返回false说明该operation还被准备去执行 */
+    if (!op.do_operation(m_gpu)) 
     {
         // cancel operation
         if (op.is_kernel()) {
@@ -269,12 +296,19 @@ bool stream_manager::operation(bool *sim) {
     return check;
 }
 
+/**
+ * 检查是否有kernel已经执行完毕，如果执行完毕则修改stream_manager对应状态
+ */
 bool stream_manager::check_finished_kernel() {
+    /*grid_uid != 0即为执行完毕的kernel的id*/
     unsigned grid_uid = m_gpu->finished_kernel();
     bool check = register_finished_kernel(grid_uid);
     return check;
 }
 
+/**
+ * stream_manager对执行完毕的kernel需要改变的状态信息，其中 grid_uid是kernel id
+ */
 bool stream_manager::register_finished_kernel(unsigned grid_uid) {
     // called by gpu simulation thread
     if (grid_uid > 0) {
@@ -336,6 +370,9 @@ void stream_manager::stop_all_running_kernels() {
     pthread_mutex_unlock(&m_lock);
 }
 
+/**
+ * 
+ */
 stream_operation stream_manager::front() {
     // called by gpu simulation thread
     stream_operation result;
@@ -402,6 +439,10 @@ void stream_manager::destroy_stream(CUstream_st *stream) {
     pthread_mutex_unlock(&m_lock);
 }
 
+/**
+ * 判断所有的cuda stream是否执行完毕
+ * 首先检查cuda stream队列是否为空，然后检查队列中的每一个cuda stream是否还有未处理的操作
+ */
 bool stream_manager::concurrent_streams_empty() {
     bool result = true;
     if (m_streams.empty())
@@ -418,6 +459,7 @@ bool stream_manager::concurrent_streams_empty() {
     }
     return result;
 }
+
 
 bool stream_manager::empty_protected() {
     bool result = true;
@@ -456,11 +498,15 @@ void stream_manager::print_impl(FILE *fp) {
         m_stream_zero.print(fp);
 }
 
+/**
+ * 
+ */
 void stream_manager::push(stream_operation op) {
+    /*得到该operation对应的cuda stream */
     struct CUstream_st *stream = op.get_stream();
 
-    // block if stream 0 (or concurrency disabled) and pending concurrent
-    // operations exist
+    // block if stream 0 (or concurrency disabled) and pending concurrent operations exist
+    /**如果当前operation对应的stream为NULL并且不允许stream并发,则阻塞host thread,即不在向gpu thread派遣任务 */
     bool block = !stream || m_cuda_launch_blocking;
     while (block) {
         pthread_mutex_lock(&m_lock);
@@ -470,11 +516,11 @@ void stream_manager::push(stream_operation op) {
 
     pthread_mutex_lock(&m_lock);
     if (!m_gpu->cycle_insn_cta_max_hit()) {
-        // Accept the stream operation if the maximum cycle/instruction/cta
-        // counts are not triggered
+        // Accept the stream operation if the maximum cycle/instruction/cta counts are not triggered
         if (stream && !m_cuda_launch_blocking) {
             stream->push(op);
         } else {
+            /*用默认stream执行 */
             op.set_stream(&m_stream_zero);
             m_stream_zero.push(op);
         }
@@ -488,6 +534,8 @@ void stream_manager::push(stream_operation op) {
     if (g_debug_execution >= 3)
         print_impl(stdout);
     pthread_mutex_unlock(&m_lock);
+
+    /** */
     if (m_cuda_launch_blocking || stream == NULL) {
         unsigned int wait_amount = 100;
         unsigned int wait_cap = 100000; // 100ms

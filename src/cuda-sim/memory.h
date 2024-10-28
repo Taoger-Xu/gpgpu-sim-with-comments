@@ -124,7 +124,7 @@ public:
 };
 
 /**
- * memory space具体实现
+ * memory space具体实现，采用hash表实现，即给定地址mem_addr_t，hash出对应的连续字节block的 mem_storage
  */
 template <unsigned BSIZE> class memory_space_impl : public memory_space {
 public:
@@ -143,6 +143,7 @@ private:
     void read_single_block(mem_addr_t blk_idx, mem_addr_t addr, size_t length,
                            void *data) const;
     std::string m_name;
+    /*block的二进制位数，如果block size = 4 byte ，则m_log2_block_size = 2 */
     unsigned m_log2_block_size;
     typedef mem_map<mem_addr_t, mem_storage<BSIZE>> map_t;
     map_t m_data;

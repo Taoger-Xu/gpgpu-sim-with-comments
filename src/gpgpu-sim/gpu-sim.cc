@@ -799,6 +799,9 @@ void gpgpu_sim_config::reg_options(option_parser_t opp) {
 
 /////////////////////////////////////////////////////////////////////////////
 
+/**
+ * 先在x维加一，如果x维超过bound则在y维加一，y维超过bound则在z维加一
+ */
 void increment_x_then_y_then_z(dim3 &i, const dim3 &bound) {
     i.x++;
     if (i.x >= bound.x) {
@@ -813,26 +816,27 @@ void increment_x_then_y_then_z(dim3 &i, const dim3 &bound) {
 }
 
 /**
- * 
+ * 为timing model设置将要执行的kernel的信息，即在m_running_kernels中对应位置设置为将要执行的kernel
  */
 void gpgpu_sim::launch(kernel_info_t *kinfo) {
     unsigned kernelID = kinfo->get_uid();
     unsigned long long streamID = kinfo->get_streamID();
 
+    /*kernel的开始周期为gpu_tot_sim_cycle + gpu_sim_cycle，结束周期暂时为0*/
     kernel_time_t kernel_time = {gpu_tot_sim_cycle + gpu_sim_cycle, 0};
+
+    /*使用gpu_kernel_time记录stream ID + kernel ID索引的kernel的执行时间*/
     if (gpu_kernel_time.find(streamID) == gpu_kernel_time.end()) {
         std::map<unsigned, kernel_time_t> new_val;
-        new_val.insert(
-            std::pair<unsigned, kernel_time_t>(kernelID, kernel_time));
-        gpu_kernel_time.insert(
-            std::pair<unsigned long long, std::map<unsigned, kernel_time_t>>(
+        new_val.insert(std::pair<unsigned, kernel_time_t>(kernelID, kernel_time));
+        gpu_kernel_time.insert(std::pair<unsigned long long, std::map<unsigned, kernel_time_t>>(
                 streamID, new_val));
     } else {
-        gpu_kernel_time.at(streamID).insert(
-            std::pair<unsigned, kernel_time_t>(kernelID, kernel_time));
-        ////////// assume same kernel ID do not appear more than once
+        gpu_kernel_time.at(streamID).insert(std::pair<unsigned, kernel_time_t>(kernelID, kernel_time));
+        // assume same kernel ID do not appear more than once
     }
 
+    /*获取程序指定的一个cta中thread的数量*/
     unsigned cta_size = kinfo->threads_per_cta();
     if (cta_size > m_shader_config->n_thread_per_shader) {
         printf(
@@ -848,15 +852,21 @@ void gpgpu_sim::launch(kernel_info_t *kinfo) {
         abort();
     }
     unsigned n = 0;
+
+    /*遍历m_running_kernels，寻找空闲的位置用来登记将要执行的kernel*/
     for (n = 0; n < m_running_kernels.size(); n++) {
         if ((NULL == m_running_kernels[n]) || m_running_kernels[n]->done()) {
             m_running_kernels[n] = kinfo;
             break;
         }
     }
+
     assert(n < m_running_kernels.size());
 }
 
+/**
+ * 判断gpgpu是否可以运行一个新的kernel
+ */
 bool gpgpu_sim::can_start_kernel() {
     for (unsigned n = 0; n < m_running_kernels.size(); n++) {
         if ((NULL == m_running_kernels[n]) || m_running_kernels[n]->done())
@@ -866,6 +876,7 @@ bool gpgpu_sim::can_start_kernel() {
 }
 
 /**
+ * 该函数判断gpgpu-sim是否已经达到能并发运行的CTA数量
  * gpu_max_cta_opt选项是指的是，GPGPU-Sim所能达到最大CTA并发数(0 = no limit)，在配置选项中定义。
  * gpu_tot_issued_cta即总发出的CTA数量，加上m_total_cta_launched即已经启动的CTA数量（m_config.gpu_max_cta_opt）
  */
@@ -878,6 +889,11 @@ bool gpgpu_sim::hit_max_cta_count() const {
     return false;
 }
 
+/**
+ * 该函数判断gpgpu-sim能否运行该kernel，满足以下条件：
+ *  1. gpgpu-sim未达到最大并发CTA的限制
+ *  2. 该kernel还有空闲的cta未运行
+ */
 bool gpgpu_sim::kernel_more_cta_left(kernel_info_t *kernel) const {
     if (hit_max_cta_count())
         return false;
@@ -887,6 +903,7 @@ bool gpgpu_sim::kernel_more_cta_left(kernel_info_t *kernel) const {
 
     return false;
 }
+
 
 /**
  * 检查当前的gpgpu能否执行更多的CTA
@@ -912,7 +929,13 @@ void gpgpu_sim::decrement_kernel_latency() {
     }
 }
 
+/**
+ * 选择一个kernel放在gpgpu-sim上进行仿真
+ */
 kernel_info_t *gpgpu_sim::select_kernel() {
+    /**
+     * 如果该kernel非空+kernel还有cta等待运行+kernel的launch延迟已经结束
+     */
     if (m_running_kernels[m_last_issued_kernel] &&
         !m_running_kernels[m_last_issued_kernel]->no_more_ctas_to_run() &&
         !m_running_kernels[m_last_issued_kernel]->m_kernel_TB_latency) {
@@ -930,6 +953,12 @@ kernel_info_t *gpgpu_sim::select_kernel() {
         return m_running_kernels[m_last_issued_kernel];
     }
 
+    /**
+     * m_last_issued_kernel不满足被优先选择执行的条件时，则从所有正在运行的内核中选择，选择策略是如下方
+  //式计算(n + m_last_issued_kernel + 1) % m_config.max_concurrent_kernel。即顺序选择上一次发出的
+  //m_last_issued_kernel在m_running_kernels中的下一个编号的内核，依次轮询。max_concurrent_kernel
+  //表示模拟的GPU上可能并发执行的最大内核数量。
+     */
     for (unsigned n = 0; n < m_running_kernels.size(); n++) {
         unsigned idx =
             (n + m_last_issued_kernel + 1) % m_config.max_concurrent_kernel;
@@ -953,6 +982,10 @@ kernel_info_t *gpgpu_sim::select_kernel() {
     return NULL;
 }
 
+/**
+ * 得到已经执行完毕的kernel队列的头部，即最早执行完毕的kernel id
+ * 如果没有kernel执行完毕，返回0
+ */
 unsigned gpgpu_sim::finished_kernel() {
     if (m_finished_kernel.empty()) {
         last_streamID = -1;
@@ -963,13 +996,17 @@ unsigned gpgpu_sim::finished_kernel() {
     return result;
 }
 
+/**
+ * 设置kernel结束需要更新的状态信息，包括：
+ *  last_uid、last_streamID、gpu_kernel_time、m_finished_kernel
+ * 同时从m_running_kernels清除该kernel
+ */
 void gpgpu_sim::set_kernel_done(kernel_info_t *kernel) {
     unsigned uid = kernel->get_uid();
     last_uid = uid;
     unsigned long long streamID = kernel->get_streamID();
     last_streamID = streamID;
-    gpu_kernel_time.at(streamID).at(uid).end_cycle =
-        gpu_tot_sim_cycle + gpu_sim_cycle;
+    gpu_kernel_time.at(streamID).at(uid).end_cycle = gpu_tot_sim_cycle + gpu_sim_cycle;
     m_finished_kernel.push_back(uid);
     std::vector<kernel_info_t *>::iterator k;
     for (k = m_running_kernels.begin(); k != m_running_kernels.end(); k++) {
@@ -1006,7 +1043,7 @@ void exec_gpgpu_sim::createSIMTCluster() {
 }
 
 /**
- * gpgpu_sim构造函数
+ * gpgpu_sim构造函数，完成所有micro architecture model和statistic collection structures的初始化
  */
 gpgpu_sim::gpgpu_sim(const gpgpu_sim_config &config, gpgpu_context *ctx)
     : gpgpu_t(config, ctx), m_config(config) {
@@ -1075,13 +1112,12 @@ gpgpu_sim::gpgpu_sim(const gpgpu_sim_config &config, gpgpu_context *ctx)
     time_vector_create(NUM_MEM_REQ_STAT);
 
     /*打印 performance model initialization complete*/
-    fprintf(stdout,
-            "GPGPU-Sim uArch: performance model initialization complete.\n");
+    fprintf(stdout, "GPGPU-Sim uArch: performance model initialization complete.\n");
 
     m_running_kernels.resize(config.max_concurrent_kernel, NULL);
     m_last_issued_kernel = 0;
-    m_last_cluster_issue = m_shader_config->n_simt_clusters -
-                           1; // this causes first launch to use simt cluster 0
+    // this causes first launch to use simt cluster 0
+    m_last_cluster_issue = m_shader_config->n_simt_clusters - 1; 
     *average_pipeline_duty_cycle = 0;
     *active_sms = 0;
 
@@ -1860,15 +1896,21 @@ unsigned exec_shader_core_ctx::sim_init_thread(
                                num_threads, core, hw_cta_id, hw_warp_id, gpu);
 }
 
+/**
+ * 把kernel发射到simt core上执行
+ */
 void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
+    /*不支持SM上的并发内核（默认为禁用），在V100配置中禁用*/
     if (!m_config->gpgpu_concurrent_kernel_sm)
         set_max_cta(kernel);
     else
+    /*支持SM上的并发kernel */
         assert(occupy_shader_resource_1block(kernel, true));
 
+    /*该kernel对应的simt core的数量加一 */
     kernel.inc_running();
 
-    // find a free CTA context
+    /*free_cta_hw_id指没有被占用的CTA ID，下面找一个空闲的CTA */
     unsigned free_cta_hw_id = (unsigned)-1;
 
     unsigned max_cta_per_core;
@@ -1876,20 +1918,27 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
         max_cta_per_core = kernel_max_cta_per_shader;
     else
         max_cta_per_core = m_config->max_cta_per_core;
+    
+    /**
+     * 轮询SIMT Core中的可以运行的CTA，查找处于非活跃状态的CTA，将其编号赋值到free_cta_hw_id
+     * m_cta_status[i] == 0 即当前CTA活跃的thread数量为0
+     */
     for (unsigned i = 0; i < max_cta_per_core; i++) {
         if (m_cta_status[i] == 0) {
             free_cta_hw_id = i;
             break;
         }
     }
+
     assert(free_cta_hw_id != (unsigned)-1);
 
-    // determine hardware threads and warps that will be used for this CTA
+    /*计算这个cta需要的hardware threads and warps*/
     int cta_size = kernel.threads_per_cta();
 
     // hw warp id = hw thread id mod warp size, so we need to find a range
     // of hardware thread ids corresponding to an integral number of hardware
     // thread ids
+    /*cta的size需要满足wrap的整数倍，其实这一步是重复的，因为kernel_padded_threads_per_cta的计算过程与padded_cta_size一致*/
     int padded_cta_size = cta_size;
     if (cta_size % m_config->warp_size)
         padded_cta_size =
@@ -1898,9 +1947,11 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
     unsigned int start_thread, end_thread;
 
     if (!m_config->gpgpu_concurrent_kernel_sm) {
+        /*start_thread的计算即为 cta_id * cta_size*/
         start_thread = free_cta_hw_id * padded_cta_size;
         end_thread = start_thread + cta_size;
     } else {
+        /*并发内核使用，在V100配置中用不到*/
         start_thread = find_available_hwtid(padded_cta_size, true);
         assert((int)start_thread != -1);
         end_thread = start_thread + cta_size;
@@ -1909,8 +1960,8 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
         m_occupied_cta_to_hwtid[free_cta_hw_id] = start_thread;
     }
 
-    // reset the microarchitecture state of the selected hardware thread and
-    // warp contexts
+    // reset the microarchitecture state of the selected hardware thread and warp contexts
+    /*这个函数暂时未实现 */
     reinit(start_thread, end_thread, false);
 
     // initalize scalar threads and determine which hardware warps they are
@@ -2014,6 +2065,10 @@ int gpgpu_sim::next_clock_domain(void) {
     return mask;
 }
 
+/**
+ * 轮询所有的simt core cluster，都执行一遍simt_core_cluster::issue_block2core()
+ * 使用m_last_cluster_issue记录最后一次执行CTA的cluster id
+ */
 void gpgpu_sim::issue_block2core() {
     unsigned last_issued = m_last_cluster_issue;
     for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {

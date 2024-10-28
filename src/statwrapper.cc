@@ -1,11 +1,11 @@
 // a Wraper function for stats class
-#include <stdio.h>
 #include "intersim2/stats.hpp"
+#include <stdio.h>
 
 Stats *StatCreate(const char *name, double bin_size, int num_bins) {
-  Stats *newstat = new Stats(NULL, name, bin_size, num_bins);
-  newstat->Clear();
-  return newstat;
+    Stats *newstat = new Stats(NULL, name, bin_size, num_bins);
+    newstat->Clear();
+    return newstat;
 }
 
 void StatClear(void *st) { ((Stats *)st)->Clear(); }
@@ -19,15 +19,15 @@ double StatMax(void *st) { return ((Stats *)st)->Max(); }
 double StatMin(void *st) { return ((Stats *)st)->Min(); }
 
 void StatDisp(void *st) {
-  printf("Stats for ");
-  ((Stats *)st)->DisplayHierarchy();
-  //   if (((Stats *)st)->NeverUsed()) {
-  //      printf (" was never updated!\n");
-  //   } else {
-  printf("Min %f Max %f Average %f \n", ((Stats *)st)->Min(),
-         ((Stats *)st)->Max(), StatAverage(st));
-  ((Stats *)st)->Display();
-  //   }
+    printf("Stats for ");
+    ((Stats *)st)->DisplayHierarchy();
+    //   if (((Stats *)st)->NeverUsed()) {
+    //      printf (" was never updated!\n");
+    //   } else {
+    printf("Min %f Max %f Average %f \n", ((Stats *)st)->Min(),
+           ((Stats *)st)->Max(), StatAverage(st));
+    ((Stats *)st)->Display();
+    //   }
 }
 
 #if 0 

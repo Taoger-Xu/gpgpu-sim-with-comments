@@ -202,6 +202,7 @@ void register_ptx_function(const char *name, function_info *impl) {
  *  - 直接调用GPGPUSim_Init()
  *  - 通过GPGPUSim_Context()间接调用
  * 通过start_sim_thread函数开启新的线程进行timing model模拟
+ * 返回的_cuda_device_id标识当前模拟的GPGPU的id
  */
 struct _cuda_device_id *gpgpu_context::GPGPUSim_Init() {
     _cuda_device_id *the_device = the_gpgpusim->the_cude_device;
@@ -209,8 +210,9 @@ struct _cuda_device_id *gpgpu_context::GPGPUSim_Init() {
         /**
          * gpgpu_ptx_sim_init_perf()位于gpgpusim_entrypoint.cc，其主要作用为解析
          * environmental variables, command line parameters and configuration
-         * files， 得到的gpgpu_sim赋值给g_the_gpu
+         * files， 得到的gpgpu_sim赋值给g_the_gpu, 并返回全局唯一的gpgpu_sim
          */
+        /*the_gpu 即是全局唯一的gpgpu_sim对象*/
         gpgpu_sim *the_gpu = gpgpu_ptx_sim_init_perf();
 
         /**将cudaDeviceProp类型的变量通过calloc申请出来；将硬件的配置参数设置到这个变量上去 */
@@ -269,6 +271,7 @@ struct _cuda_device_id *gpgpu_context::GPGPUSim_Init() {
 
 /**
  * GPGPUSim_Context()间接调用 GPGPUSim_Init()完成整个gpgpu-sim的初始化
+ * 
  */
 CUctx_st *GPGPUSim_Context(gpgpu_context *ctx) {
     // static CUctx_st *the_context = NULL;
@@ -825,7 +828,7 @@ void **cudaRegisterFatBinaryInternal(void *fatCubin,
 
 
 /**
- * cudaRegisterFatBinary()完成后执行cudaRegisterFunction()
+ * cudaRegisterFatBinary()完成后执行cudaRegisterFunction(), 进一步调用cuobjdumpParseBinary()
  */
 void cudaRegisterFunctionInternal(void **fatCubinHandle, const char *hostFun,
                                   char *deviceFun, const char *deviceName,
@@ -1011,6 +1014,7 @@ cudaError_t cudaLaunchInternal(const char *hostFun,
         announce_call(__my_func__);
     }
     CUctx_st *context = GPGPUSim_Context(ctx);
+    /*通过解析配置文件获取 g_ptx_sim_mode，即仿真模式 */
     char *mode = getenv("PTX_SIM_MODE_FUNC");
     if (mode)
         sscanf(mode, "%u", &(ctx->func_sim->g_ptx_sim_mode));
@@ -1091,6 +1095,7 @@ cudaError_t cudaLaunchInternal(const char *hostFun,
            "blockDim = (%u,%u,%u) \n",
            kname.c_str(), stream ? stream->get_uid() : 0, gridDim.x, gridDim.y,
            gridDim.z, blockDim.x, blockDim.y, blockDim.z);
+    
     stream_operation op(grid, ctx->func_sim->g_ptx_sim_mode, stream);
     ctx->the_gpgpusim->g_stream_manager->push(op);
     ctx->api->g_cuda_launch_stack.pop_back();
@@ -1246,9 +1251,13 @@ __host__ cudaError_t CUDARTAPI cudaMallocArrayInternal(
     }
 }
 
+/**
+ * cudaMemcpy() API在gpgpu-sim的实现
+ */
 __host__ cudaError_t CUDARTAPI
 cudaMemcpyInternal(void *dst, const void *src, size_t count,
                    enum cudaMemcpyKind kind, gpgpu_context *gpgpu_ctx = NULL) {
+    /*确保全局唯一的gpgpu_context的对象 */
     gpgpu_context *ctx;
     if (gpgpu_ctx) {
         ctx = gpgpu_ctx;
@@ -1258,6 +1267,7 @@ cudaMemcpyInternal(void *dst, const void *src, size_t count,
     if (g_debug_execution >= 3) {
         announce_call(__my_func__);
     }
+    /*为什么这里不需要初始化 */
     // CUctx_st *context = GPGPUSim_Context();
     // gpgpu_t *gpu = context->get_device()->get_gpgpu();
     if (g_debug_execution >= 3)
@@ -3596,6 +3606,7 @@ cuda_runtime_api::findPTXSection(const std::string identifier) {
 
 /**
  * Extract the code using cuobjdump and remove unnecessary sections
+ * 主要通过 extract_code_using_cuobjdump() 解析PTX文件
  */
 void cuda_runtime_api::cuobjdumpInit() {
     CUctx_st *context = GPGPUSim_Context(gpgpu_ctx);
@@ -3611,6 +3622,7 @@ void cuda_runtime_api::cuobjdumpInit() {
 //! Either submit PTX for simulation or convert SASS to PTXPlus and submit it
 /**
  * 主要调用gpgpu_ptx_sim_load_ptx_from_filename()去初始化parser
+ * 其主要是调用gpgpu_ptxinfo_load_from_string()
  */
 void gpgpu_context::cuobjdumpParseBinary(unsigned int handle) {
     CUctx_st *context = GPGPUSim_Context(this);
@@ -4214,9 +4226,13 @@ int cuda_runtime_api::load_constants(symbol_table *symtab, addr_t min_gaddr,
     return nc_bytes;
 }
 
+/**
+ * 被cudaLaunchInternal调用的核心函数, 主要目的是创建和kernel函数相关的kernel_info_t对象
+ */
 kernel_info_t *cuda_runtime_api::gpgpu_cuda_ptx_sim_init_grid(
     const char *hostFun, gpgpu_ptx_sim_arg_list_t args, struct dim3 gridDim,
     struct dim3 blockDim, CUctx_st *context) {
+    
     if (g_debug_execution >= 3) {
         announce_call(__my_func__);
     }

@@ -193,6 +193,7 @@ public:
                m_type == stream_memcpy_device_to_host ||
                m_type == stream_memcpy_host_to_device;
     }
+    /*是否为空操作 */
     bool is_noop() const { return m_type == stream_no_op; }
     bool is_done() const { return m_done; }
     kernel_info_t *get_kernel() { return m_kernel; }
@@ -202,10 +203,13 @@ public:
     void set_stream(CUstream_st *stream) { m_stream = stream; }
 
 private:
+    /*该operation所在的cuda stream */
     struct CUstream_st *m_stream;
 
+    /*表示该operation是否被执行*/
     bool m_done;
 
+    /*该operation对应的类型 */
     stream_operation_type m_type;
     size_t m_device_address_dst;
     size_t m_device_address_src;
@@ -216,10 +220,12 @@ private:
     const char *m_symbol;
     size_t m_offset;
 
+    /*为true表示该operation进行function sim， 为false则为performance sim*/
     bool m_sim_mode;
     kernel_info_t *m_kernel;
     struct CUevent_st *m_event;
 };
+
 /**
  * 对一个单独的cuda stream进行建模
  */
@@ -277,12 +283,18 @@ public:
 private:
     void print_impl(FILE *fp);
 
+    /*是否停止向gpgpu-sim发射更多的operation, 用来控制是否可以进行cuda stream的并行执行 */
     bool m_cuda_launch_blocking;
+    /*timing model对应的gpgpu，全局唯一 */
     gpgpu_sim *m_gpu;
     /*不同的cuda stream */
     std::list<CUstream_st *> m_streams;
+    
+    /*记录kernel id对应的 cuda stream，主要在stream_manager中使用*/
     std::map<unsigned, CUstream_st *> m_grid_id_to_stream;
+    /*gpgpu-sim中的默认cuda stream, 用于处理一些特定的操作，如同步或管理一些不需要额外流的任务 */
     CUstream_st m_stream_zero;
+    /*默认stream是否已经运行 */
     bool m_service_stream_zero;
     pthread_mutex_t m_lock;
     std::list<struct CUstream_st *>::iterator m_last_stream;

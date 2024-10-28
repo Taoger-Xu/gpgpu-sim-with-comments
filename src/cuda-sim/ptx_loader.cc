@@ -373,6 +373,9 @@ void gpgpu_context::gpgpu_ptx_info_load_from_filename(const char *filename,
   fclose(ptxinfo_in);
 }
 
+/**
+ * 使用lex
+ */
 void gpgpu_context::gpgpu_ptxinfo_load_from_string(const char *p_for_info,
                                                    unsigned source_num,
                                                    unsigned sm_version,

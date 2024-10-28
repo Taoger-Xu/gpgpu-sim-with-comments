@@ -82,11 +82,16 @@ static void termination_callback() {
 
 /**
  * 对于cuda引用，运行gpgpu_sim_thread_concurrent进行时序模拟
+ * 使用active
  */
 void *gpgpu_sim_thread_concurrent(void *ctx_ptr) {
     gpgpu_context *ctx = (gpgpu_context *)ctx_ptr;
     atexit(termination_callback);
     // concurrent kernel execution simulation thread
+    /**
+     * g_sim_done在start_sim_thread()中设置为false，然后陷入while死循环
+     * 在
+     */
     do {
         if (g_debug_execution >= 3) {
             printf("GPGPU-Sim: *** simulation thread starting and spinning "
@@ -121,17 +126,23 @@ void *gpgpu_sim_thread_concurrent(void *ctx_ptr) {
             // happens to be another kernel, the gpu is not re-initialized and
             // the inter-kernel behaviour may be incorrect. Check that a kernel
             // has finished and no other kernel is currently running.
+            
+            /*这里是bug修复相关代码，即在kernel执行完毕后要退出内部循环以重新初始化gpgpu-sim模拟器 */
+            /**
+             * 这里的g_stream_manager->operation(&sim_cycles)会尝试弹出一个operation去执行
+             * 在operation()函数中会根据operation的kernel信息做好进行function or performance sim的准备
+             */
             if (ctx->the_gpgpusim->g_stream_manager->operation(&sim_cycles) &&
                 !ctx->the_gpgpusim->g_the_gpu->active())
                 break;
 
             // functional simulation
             if (ctx->the_gpgpusim->g_the_gpu->is_functional_sim()) {
-                kernel_info_t *kernel =
-                    ctx->the_gpgpusim->g_the_gpu->get_functional_kernel();
+                kernel_info_t *kernel = ctx->the_gpgpusim->g_the_gpu->get_functional_kernel();
                 assert(kernel);
-                ctx->the_gpgpusim->gpgpu_ctx->func_sim
-                    ->gpgpu_cuda_ptx_sim_main_func(*kernel);
+                /*functional simulation的主体代码，对kernel进行function sim*/
+                ctx->the_gpgpusim->gpgpu_ctx->func_sim->gpgpu_cuda_ptx_sim_main_func(*kernel);
+                /*结束function sim*/
                 ctx->the_gpgpusim->g_the_gpu->finish_functional_sim(kernel);
             }
 
@@ -142,13 +153,13 @@ void *gpgpu_sim_thread_concurrent(void *ctx_ptr) {
                 ctx->the_gpgpusim->g_the_gpu->deadlock_check();
             } else {
                 if (ctx->the_gpgpusim->g_the_gpu->cycle_insn_cta_max_hit()) {
-                    ctx->the_gpgpusim->g_stream_manager
-                        ->stop_all_running_kernels();
+                    ctx->the_gpgpusim->g_stream_manager->stop_all_running_kernels();
                     ctx->the_gpgpusim->g_sim_done = true;
                     ctx->the_gpgpusim->break_limit = true;
                 }
             }
-
+            
+            /*active = gpu-active() or stream_manager->empty()*/
             active = ctx->the_gpgpusim->g_the_gpu->active() ||
                      !(ctx->the_gpgpusim->g_stream_manager->empty_protected());
 
@@ -262,8 +273,12 @@ gpgpu_sim *gpgpu_context::gpgpu_ptx_sim_init_perf() {
     return the_gpgpusim->g_the_gpu;
 }
 
+/**
+ * 启动gpu thread用来执行gpgpu-sim仿真
+ */
 void gpgpu_context::start_sim_thread(int api) {
     if (the_gpgpusim->g_sim_done) {
+        /*设置g_sim_done为false */
         the_gpgpusim->g_sim_done = false;
         if (api == 1) {
             pthread_create(&(the_gpgpusim->g_simulation_thread), NULL,

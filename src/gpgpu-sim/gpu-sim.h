@@ -525,9 +525,9 @@ private:
 };
 
 /**
- * gpgpu_sim是top-level GPU timing simulation model，其继承自gpgpu_t(top-level
- * class that implements a functional GPU simulator) 全局只有一个gpgpu_sim实例：
- * g_the_gpu, 所以暂时不支持多gpu模拟
+ * gpgpu_sim是timing simulation model的最顶层对象，其继承自gpgpu_t(functional GPU simulator的最顶层) 
+ * 全局只有一个gpgpu_sim实例：g_the_gpu, 所以暂时不支持多gpu模拟
+ * 其主要包括当前gpgpu的配置信息,统计数据,时序状态等
  */
 class gpgpu_sim : public gpgpu_t {
 public:
@@ -643,9 +643,16 @@ protected:
     class memory_partition_unit **m_memory_partition_unit;
     class memory_sub_partition **m_memory_sub_partition;
 
+    /**
+     * 用来记录运行在当前gpgpu上的所有kernel的结构体
+     * 在构造函数中进行初始化：m_running_kernels.resize(config.max_concurrent_kernel
+    */
     std::vector<kernel_info_t *> m_running_kernels;
+
+    /*指向最后一次发出的kernel，用来索引m_running_kernels，初始化为0*/
     unsigned m_last_issued_kernel;
 
+    /*记录已经执行完毕的kernel，kernel_info_t对象的唯一标识符m_uid */
     std::list<unsigned> m_finished_kernel;
     // m_total_cta_launched == per-kernel count. gpu_tot_issued_cta == global
     // count.
@@ -653,6 +660,7 @@ protected:
     unsigned long long gpu_tot_issued_cta;
     unsigned gpu_completed_cta;
 
+    /*最近一次发射CTA到simt core cluster的id号*/
     unsigned m_last_cluster_issue;
     float *average_pipeline_duty_cycle;
     float *active_sms;
@@ -710,9 +718,11 @@ public:
         unsigned long long start_cycle;
         unsigned long long end_cycle;
     } kernel_time_t;
-    std::map<unsigned long long, std::map<unsigned, kernel_time_t>>
-        gpu_kernel_time;
+    /*记录stream id + kernel id对应的kernel的执行时间，即周期数=gpu_tot_sim_cycle + gpu_sim_cycle*/
+    std::map<unsigned long long, std::map<unsigned, kernel_time_t>> gpu_kernel_time;
+    /*记录最近一次完成的kernel对应的cuda stream */
     unsigned long long last_streamID;
+    /*记录最近一次完成的kernel的uid */
     unsigned long long last_uid;
     cache_stats aggregated_l1_stats;
     cache_stats aggregated_l2_stats;
@@ -738,19 +748,28 @@ public:
     // Jin: functional simulation for CDP
 private:
     // set by stream operation every time a functoinal simulation is done
+    /*如果该operation要进行functoinal simulation，则每次stream operation的do_operation()根据op的属性设置为true/false*/
+    /*构造函数初始化为false */
     bool m_functional_sim;
+    /*要进行functoinal simulation的kernel的信息 */
     kernel_info_t *m_functional_sim_kernel;
 
 public:
+    /*是否进行functoinal simulation */
     bool is_functional_sim() { return m_functional_sim; }
+    /*得到functoinal simulation对应的kernel信息 */
     kernel_info_t *get_functional_kernel() { return m_functional_sim_kernel; }
+    /*得到正在gpgpu-sim中运行的所有kernel*/
     std::vector<kernel_info_t *> get_running_kernels() {
         return m_running_kernels;
-    }
+    }   
+    /*启动functoinal simulation*/
     void functional_launch(kernel_info_t *k) {
         m_functional_sim = true;
         m_functional_sim_kernel = k;
     }
+    
+    /*结束functoinal simulation，其参数未使用 */
     void finish_functional_sim(kernel_info_t *k) {
         assert(m_functional_sim);
         assert(m_functional_sim_kernel == k);

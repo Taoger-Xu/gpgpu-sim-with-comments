@@ -271,18 +271,31 @@ void gpgpu_t::gpgpu_ptx_sim_unbindTexture(
     m_NameToTextureInfo.erase(texname);
 }
 
+/*定义指令最大占用8字节大小==64 bit。 */
 #define MAX_INST_SIZE 8 /*bytes*/
 
+/**
+ * 每个kernel函数在加载到GPGPU-Sim时都会进行Control Flow Analysis和Pre-decode。
+ * 当PTX parser检测到一个内核函数的结束时，它会调用 function_info::ptx_assemble()，这个函数做了以下工作
+ *  1. 给函数中的每条指令分配一个唯一的PC
+ *  2. 解析function每一个 branch label到一个对应的PC,比如决定每一个each branch instruction的目标地址
+ *  3. 创建这个function对应的 control flow graph
+ *  4. Pre-decode each instruction, 加快仿真速度
+ */
 void function_info::ptx_assemble() {
+    /**用于表示GPGPU-Sim内核是否已经完成编译和装配。如果内核已经完成 编译和装配，则m_assembled变量的值为true*/
     if (m_assembled) {
         return;
     }
 
     // get the instructions into instruction memory...
     unsigned num_inst = m_instructions.size();
+    /*m_instr_mem_size变量存储了所有指令存储所需的存储空间大小，以字节为单位 */
     m_instr_mem_size = MAX_INST_SIZE * (num_inst + 1);
+    /*m_instr_mem是指令在内存中的位置*/
     m_instr_mem = new ptx_instruction *[m_instr_mem_size];
 
+    /*m_name是由nvcc编译器编译后的PTX指令中为内核函数指定的唯一的函数名 */
     printf("GPGPU-Sim PTX: instruction assembly for function \'%s\'... ",
            m_name.c_str());
     fflush(stdout);
@@ -1109,6 +1122,13 @@ static unsigned datatype2size(unsigned data_type) {
     return data_size;
 }
 
+/**
+ * Detect LD/ST instruction.
+ * Determine if the instruction writes to a destination register.
+ * Obtain the reconvergence PC if this is a branch instruction.
+ * Extract the register operands of the instruction.
+ * Detect predicated instruction.
+ */
 void ptx_instruction::pre_decode() {
     pc = m_PC;
     isize = m_inst_size;
@@ -2535,10 +2555,12 @@ unsigned max_cta(const struct gpgpu_ptx_sim_info *kernel_info,
 
     return result;
 }
-/*!
-This function simulates the CUDA code functionally, it takes a kernel_info_t
-parameter which holds the data for the CUDA kernel to be executed
-!*/
+
+/**
+ * This function simulates the CUDA code functionally, it takes a kernel_info_t
+ * parameter which holds the data for the CUDA kernel to be executed
+ * gpgpu_cuda_ptx_sim_main_func()是进行function sim的主体函数
+ */
 void cuda_sim::gpgpu_cuda_ptx_sim_main_func(kernel_info_t &kernel,
                                             bool openCL) {
     printf(
@@ -2551,6 +2573,7 @@ void cuda_sim::gpgpu_cuda_ptx_sim_main_func(kernel_info_t &kernel,
     // before we execute, we should do PDOM analysis for functional simulation
     // scenario.
     function_info *kernel_func_info = kernel.entry();
+    /*kernel_info 指向 kernel 的PTX分析出的一些参数*/
     const struct gpgpu_ptx_sim_info *kernel_info =
         ptx_sim_kernel_info(kernel_func_info);
     checkpoint *g_checkpoint;

@@ -88,6 +88,7 @@ enum exec_unit_type_t {
 
 class thread_ctx_t {
 public:
+    /*该thread所属的hardware CTA，不同于多维的cta索引，硬件cta id按照max_cta_num的顺序从0-max递增 */
     unsigned m_cta_id; // hardware CTA this thread belongs
 
     // per thread stats (ac stands for accumulative).
@@ -1691,8 +1692,7 @@ public:
     unsigned n_thread_per_shader;
     unsigned n_regfile_gating_group;
     unsigned max_warps_per_shader;
-    unsigned
-        max_cta_per_core; // Limit on number of concurrent CTAs in shader core
+    unsigned max_cta_per_core; // Limit on number of concurrent CTAs in shader core
     unsigned max_barriers_per_cta;
     char *gpgpu_scheduler_string;
     unsigned gpgpu_shmem_per_block;
@@ -2183,6 +2183,8 @@ public:
         else
             return 0;
     }
+    
+    /*返回运行在当前simt core的kernel函数 */
     kernel_info_t *get_kernel() { return m_kernel; }
     unsigned get_sid() const { return m_sid; }
 
@@ -2687,6 +2689,7 @@ protected:
     std::vector<std::bitset<MAX_ALU_LATENCY> *> m_result_bus;
 
     // used for local address mapping with single kernel launch
+    /*一个kernel发射到simt core上时，每个simt core最多并发运行的cta数量 */
     unsigned kernel_max_cta_per_shader;
     unsigned kernel_padded_threads_per_cta;
     // Used for handing out dynamic warp_ids to new warps.

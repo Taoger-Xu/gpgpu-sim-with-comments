@@ -155,6 +155,7 @@ public:
         g_global_name_lookup; // indexed by hostVar
     std::map<const void *, std::string>
         g_const_name_lookup; // indexed by hostVar
+    /*为0则表示进行performance simulation，非0则表示只进行functional simulation，通过 -gpgpu_ptx_sim_mode 0/1 控制*/
     int g_ptx_sim_mode; // if non-zero run functional simulation only (i.e., no
                         // notion of a clock cycle)
     unsigned gpgpu_param_num_shaders;

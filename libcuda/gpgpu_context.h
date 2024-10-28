@@ -52,6 +52,8 @@ class gpgpu_context {
   cuda_runtime_api *api;
   ptxinfo_data *ptxinfo;
   ptx_recognizer *ptx_parser;
+
+  /*GPGPUsim_ctx是gpgpu_sim的进一步封装, 包括控制信号和stream manager*/
   GPGPUsim_ctx *the_gpgpusim;
   cuda_sim *func_sim;
   cuda_device_runtime *device_runtime;

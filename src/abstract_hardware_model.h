@@ -212,6 +212,9 @@ struct dim3comp {
     }
 };
 
+/**
+ * 实现在gpu-sim.cc中，实现传入的dim3维度依次在x，y，z维度的加1
+ */
 void increment_x_then_y_then_z(dim3 &i, const dim3 &bound);
 
 // Jin: child kernel information for CDP
@@ -224,7 +227,7 @@ extern std::map<void *, void **> pinned_memory;
 extern std::map<void *, size_t> pinned_memory_size;
 
 /**
- * 包含如下信息：
+ * 包含kernel函数如下信息：
  *  - Grid/Block dim的信息
  *  - the function_info object associated with the kernel entry point
  *  - launch status
@@ -240,15 +243,22 @@ public:
     //      m_num_cores_running=0;
     //      m_param_mem=NULL;
     //   }
+
+    /**暂时用不到该构造函数 */
     kernel_info_t(dim3 gridDim, dim3 blockDim, class function_info *entry,
                   unsigned long long streamID);
+    
+    /*主要使用的构造函数 */
     kernel_info_t(
         dim3 gridDim, dim3 blockDim, class function_info *entry,
         std::map<std::string, const struct cudaArray *> nameToCudaArray,
         std::map<std::string, const struct textureInfo *> nameToTextureInfo);
     ~kernel_info_t();
 
+    /*运行当前kernel的simt core的数量加一，在issue_block2core()中调用 */
     void inc_running() { m_num_cores_running++; }
+
+    /*运行当前kernel的simt core的数量减一*/
     void dec_running() {
         assert(m_num_cores_running > 0);
         m_num_cores_running--;
@@ -258,10 +268,12 @@ public:
     class function_info *entry() { return m_kernel_entry; }
     const class function_info *entry() const { return m_kernel_entry; }
 
+    /*返回grid中所有cta的数量 */
     size_t num_blocks() const {
         return m_grid_dim.x * m_grid_dim.y * m_grid_dim.z;
     }
 
+    /*返回每个cta中thread的数量 */
     size_t threads_per_cta() const {
         return m_block_dim.x * m_block_dim.y * m_block_dim.z;
     }
@@ -276,10 +288,22 @@ public:
         m_next_tid.z = 0;
     }
     dim3 get_next_cta_id() const { return m_next_cta; }
+
+    /*获取下一个要发射的CTA的索引。CTA的全局索引与CUDA编程模型中的线程块索引类似，其ID算法如下*/
     unsigned get_next_cta_id_single() const {
         return m_next_cta.x + m_grid_dim.x * m_next_cta.y +
                m_grid_dim.x * m_grid_dim.y * m_next_cta.z;
     }
+
+    /**
+     * m_next_cta是用于标识下一个要发射的CTA的坐标，它的值是一个全局ID，属于dim3类型，具有.x/.y/.z三个分值。
+     * GPU硬件配置的CTA的全局ID的范围为：
+        m_next_cta.x < m_grid_dim.x &&
+        m_next_cta.y < m_grid_dim.y &&
+        m_next_cta.z < m_grid_dim.z
+    因此如果标识下一个要发射的CTA的全局ID的任意一维超过CUDA代码设置的Grid的对应范围，就代表内核函
+    数上已经没有CTA可执行，内核函数的所有CTA均已经执行完毕
+     */
     bool no_more_ctas_to_run() const {
         return (m_next_cta.x >= m_grid_dim.x || m_next_cta.y >= m_grid_dim.y ||
                 m_next_cta.z >= m_grid_dim.z);
@@ -325,24 +349,32 @@ public:
     }
 
 private:
+    /**把copy constructor和copy operator放在private即可禁用拷贝构造和拷贝赋值 */
     kernel_info_t(const kernel_info_t &);  // disable copy constructor
     void operator=(const kernel_info_t &); // disable copy operator
 
     /*kernel的entry point */
     class function_info *m_kernel_entry;
 
+    /*kernel_info_t对象的唯一标识符，用于放进m_finished_kernel中*/
     unsigned m_uid; // Kernel ID
+
+    /*该kernel对应的cuda stream的uid */
     unsigned long long m_streamID;
 
     // These maps contain the snapshot of the texture mappings at kernel launch
     std::map<std::string, const struct cudaArray *> m_NameToCudaArray;
     std::map<std::string, const struct textureInfo *> m_NameToTextureInfo;
 
+    /*grid和grid的维度 */
     dim3 m_grid_dim;
     dim3 m_block_dim;
+
+    /*下一个要执行的CTA坐标 */
     dim3 m_next_cta;
     dim3 m_next_tid;
 
+    /*正在执行该kernel的simt core的数量，构造函数中初始化为0，通过*/
     unsigned m_num_cores_running;
 
     std::list<class ptx_thread_info *> m_active_threads;
@@ -375,12 +407,15 @@ private:
 public:
     unsigned long long launch_cycle;
     unsigned long long start_cycle;
+
+    /*该kernel对应的结束周期，为gpu_sim_cycle + gpu_tot_sim_cycle */
     unsigned long long end_cycle;
     unsigned m_launch_latency;
 
     mutable bool cache_config_set;
 
     /*this used for any CPU-GPU kernel latency and counted in the gpu_cycle */
+    /*m_kernel_TB_latency是GPGPU-Sim中用于表示内核启动时间的变量，只有为0表示该kernel可以被gpgpu-sim仿真 */
     unsigned m_kernel_TB_latency;
 };
 
@@ -1470,6 +1505,7 @@ public:
 
 protected:
     class gpgpu_sim *m_gpu;
+    /*运行在该simt core的kernel函数*/
     kernel_info_t *m_kernel;
     simt_stack **m_simt_stack; // pdom based reconvergence context for each warp
     /*一维数组，用来标记core上执行的所有thread的信息，比如使用m_thread[tid]得到对应线程的信息*/

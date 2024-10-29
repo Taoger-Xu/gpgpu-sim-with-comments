@@ -978,7 +978,7 @@ void shader_core_ctx::decode() {
 
 /**
  * fetch()逻辑如下：
- * 其核心部件是I-cache
+ * 其核心部件是LI-cache
  * 如果m_inst_fetch_buffer流水寄存器为空（decode未被stall）：
         ** 如果mshr中有回填的指令（已准备就绪）：
             *** 将指令放入m_inst_fetch_buffer。
@@ -994,7 +994,7 @@ void shader_core_ctx::fetch() {
     if (!m_inst_fetch_buffer.m_valid) {
         /**
          * 先从L1I中的mshr中获取已经就绪的指令
-         * mshr中missing cache block对应的pending load/store accesses 已经取回data
+         * mshr中missing cache block对应的pending load/store accesses 已经取回指令
         */
         if (m_L1I->access_ready()) {
             /*得到之前因为miss而在mshr中保留，但是其data已经取回的memory request的信息*/
@@ -1104,7 +1104,7 @@ void shader_core_ctx::fetch() {
                         m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle);
                     std::list<cache_event> events;
                     enum cache_request_status status;
-                    /*理想cache，缓存中的所有inst和const都命中*/
+                    /*理想cache，缓存中的所有inst和const都命中，不产生L1-Icache的访问数据*/
                     if (m_config->perfect_inst_const_cache) {
                         status = HIT;
                         shader_cache_access_log(m_sid, INSTRUCTION, 0);
@@ -1380,18 +1380,22 @@ void scheduler_unit::order_by_priority(
     }
 }
 
+/**
+ * 
+ */
 void scheduler_unit::cycle() {
     SCHED_DPRINTF("scheduler_unit::cycle()\n");
-    bool valid_inst =
-        false; // there was one warp with a valid instruction to issue (didn't
-               // require flush due to control hazard)
-    bool ready_inst = false;  // of the valid instructions, there was one not
-                              // waiting for pending register writes
+    /*there was one warp with a valid instruction to issue (didn't require flush due to control hazard)*/
+    /*ibuffer中取出的PC值与SIMT堆栈中的PC值匹配，则说明没有控制冒险*/
+    bool valid_inst = false; 
+    /*of the valid instructions, there was one not waiting for pending register writes*/
+    /*指令通过记分板检查，就可以将指令ready状态设置为true*/    
+    bool ready_inst = false; 
+    /*指令发射成功后，设置issued_inst为真*/
     bool issued_inst = false; // of these we issued one
 
     order_warps();
-    for (std::vector<shd_warp_t *>::const_iterator iter =
-             m_next_cycle_prioritized_warps.begin();
+    for (std::vector<shd_warp_t *>::const_iterator iter = m_next_cycle_prioritized_warps.begin();
          iter != m_next_cycle_prioritized_warps.end(); iter++) {
         // Don't consider warps that are not yet valid
         if ((*iter) == NULL || (*iter)->done_exit()) {
@@ -1713,6 +1717,7 @@ void scheduler_unit::cycle() {
             }
             checked++;
         }
+        
         if (issued) {
             // This might be a bit inefficient, but we need to maintain
             // two ordered list for proper scheduler execution.
@@ -4948,8 +4953,8 @@ unsigned simt_core_cluster::issue_block2core() {
                 // wait till current kernel finishes
                 if (m_core[core]->get_not_completed() == 0) {
                     kernel_info_t *k = m_gpu->select_kernel();
-                    if (k)
-                        m_core[core]->set_kernel(k);
+                    /*将该kernel设置到simt core上 */
+                    if (k) m_core[core]->set_kernel(k);
                     kernel = k;
                 }
             }

@@ -32,7 +32,6 @@ typedef struct glbmap_entry glbmap_entry_t;
  * 负责把不同的device id用链表的形式组织,其中的
  * m_id标识当前的device id
  * struct _cuda_device_id *m_next则指向下一个device
- *
  */
 struct _cuda_device_id {
     _cuda_device_id(gpgpu_sim *gpu) {

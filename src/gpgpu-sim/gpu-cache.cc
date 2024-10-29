@@ -291,9 +291,9 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
         /*Tag相符。m_tag和tag均是：{除offset位以外的所有位, offset'b0}*/
         if (line->m_tag == tag) {
             if (line->get_status(mask) == RESERVED) {
-                /**RESERVED表示之前的cache miss选择该cache block被选为填充新的数据，
-                 * 已经向lower memory发送fill request了，
-                 * 主要处理位于同一cache line的连续地址访问
+                /**
+                 * RESERVED表示之前的cache miss选择该cache block被选为填充新的数据，
+                 * 已经向lower memory发送fill request了，主要处理位于同一cache line的连续地址访问
                 */
                 idx = index;
                 return HIT_RESERVED;
@@ -413,9 +413,15 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
 }
 
 /**
- * tag_array::access()在实际访问cache会调用
+ * tag_array::access()在实际访问cache会调用，会修改tag_array对应的统计数据
  * tag_array::access()会实际修改LRU stack和对应的line的状态，并且影响cache访问统计数据
- * 其首先使用probe()检查地址addr对应的cache line的状态
+ * 其首先使用probe()检查地址addr对应的cache line的状态：
+ *    - 对于HIT/HIT_RESERVED等tag匹配，修改LRU状态和统计统计数据
+ *    - 对于MISS，需要根据on_miss/on_fill去分配不同资源处理
+ *    - 对于RESERVATION_FAIL，说明该cache无法处理当前request
+ * 
+ * wb：本次access()是否造成向下一级内存写回数据
+ * evicted_block_info &evicted：用于设置被驱逐的cache line的信息
  * 
  */
 enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
@@ -462,7 +468,7 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
                 m_dirty--;
             }
 
-            /*把需要reserve的cache line设置为新的tag*/
+            /*把需要reserve的cache line设置为新的tag，状态设置为RESERVED*/
             m_lines[idx]->allocate(m_config.tag(addr),
                                    m_config.block_addr(addr), time,
                                    mf->get_access_sector_mask());
@@ -529,15 +535,22 @@ void tag_array::fill(new_addr_type addr, unsigned time,
     // assert(status==MISS||status==SECTOR_MISS); // MSHR should have prevented
     // redundant memory request
     if (status == MISS) {
+        /*修改当前cache block对应的tag等，状态修改为RESERVED表示等待数据回填*/
         m_lines[idx]->allocate(m_config.tag(addr), m_config.block_addr(addr),
                                time, mask);
     } else if (status == SECTOR_MISS) {
         assert(m_config.m_cache_type == SECTOR);
         ((sector_cache_block *)m_lines[idx])->allocate_sector(time, mask);
     }
+
+    // 下面都是tag匹配的代码
+
+    /*之前是dirty并且填充完新的data后不是dirty，才将m_dirty减一 */
     if (before && !m_lines[idx]->is_modified_line()) {
         m_dirty--;
     }
+
+    /*判断新的cacheLine是否为dirty*/
     before = m_lines[idx]->is_modified_line();
     m_lines[idx]->fill(time, mask, byte_mask);
     if (m_lines[idx]->is_modified_line() && !before) {
@@ -545,9 +558,14 @@ void tag_array::fill(new_addr_type addr, unsigned time,
     }
 }
 
+/**
+ * 采用ON_MISS策略，之前分配的cacheLine通过参数index传入
+ */
 void tag_array::fill(unsigned index, unsigned time, mem_fetch *mf) {
     assert(m_config.m_alloc_policy == ON_MISS);
+    /*之前选的cacheLine是否为dirty data */
     bool before = m_lines[index]->is_modified_line();
+    /* */
     m_lines[index]->fill(time, mf->get_access_sector_mask(),
                          mf->get_access_byte_mask());
     if (m_lines[index]->is_modified_line() && !before) {

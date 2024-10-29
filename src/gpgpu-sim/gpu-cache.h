@@ -44,8 +44,24 @@
 
 #define MAX_DEFAULT_CACHE_SIZE_MULTIBLIER 4
 
+/**
+ * INVALID：说明cache block当前存储的数据无效
+ 
+ * VALID：说明cache block存储的数据有效，可以立即为cache hit提供数据
+  
+ * RESERVED： 当一个cache block被分配用来填充上次的之前因为miss而去low level memory取回的数据时，如果其他的request也命中该block
+ * 但是该cache block 的状态 m_status 被设置为 RESERVED，从而不需要向下级发送memory request
+ * 
+ * MODIFIED: 该 block 的数据已经被其他线程修改, 如果当前访问也是写操作的话即为命中;如果是读操作,需要通过
+ */
 enum cache_block_state { INVALID = 0, RESERVED, VALID, MODIFIED };
 
+/**
+ * HIT：tag命中，当前可以取出数据
+ * HIT_RESERVED：tag命中，表示当前cache的数据块正在回填，不需要向下级memory发送请求，只需要等待data response
+ * MISS：tag不命中，需要向下级发送memory request
+ * RESERVATION_FAIL：cache miss，并且当前cache不能分配更多的资源比如mshr去处理该miss
+ */
 enum cache_request_status {
     HIT = 0,
     HIT_RESERVED,
@@ -123,7 +139,10 @@ struct cache_event {
 const char *cache_request_status_str(enum cache_request_status status);
 
 /**
- * cache_block_t只建模cache block的tag，不建模data block
+ * cache_block_t只建模cache block的tag，不建模data block，所有的成员函数都等待子类重写
+ * 初始化设置cache block的tag位为0。
+ * Memory  |————————|——————————|————————|
+ * Address    Tag       Set    Byte Offset
  */
 struct cache_block_t {
     cache_block_t() {
@@ -131,12 +150,14 @@ struct cache_block_t {
         m_block_addr = 0;
     }
 
+    /*修改cacheline的状态*/
     virtual void allocate(new_addr_type tag, new_addr_type block_addr,
                           unsigned time,
                           mem_access_sector_mask_t sector_mask) = 0;
+    
     virtual void fill(unsigned time, mem_access_sector_mask_t sector_mask,
                       mem_access_byte_mask_t byte_mask) = 0;
-
+    
     virtual bool is_invalid_line() = 0;
     virtual bool is_valid_line() = 0;
     virtual bool is_reserved_line() = 0;
@@ -171,6 +192,7 @@ struct cache_block_t {
     new_addr_type m_tag;
     new_addr_type m_block_addr;
 };
+
 // 1. 如果是 Line Cache：按固定大小的cache block来存储数据
 //  4 sets, 6 ways, cache blocks are not split to sectors.
 //  |-----------------------------------|
@@ -183,26 +205,8 @@ struct cache_block_t {
 //  |  18 |  19 |  20 |  21 |  22 |  23 |  // set_index 3
 //  |--------------|--------------------|
 //                 |--------> 20 is the cache block index
-// 2. 如果是 Sector Cache：每个cache block被进一步细分为若干个sector或称为“扇区”
-//  4 sets, 6 ways, each cache block is split to 4 sectors.
-//  |-----------------------------------|
-//  |  0  |  1  |  2  |  3  |  4  |  5  |  // set_index 0
-//  |-----------------------------------|
-//  |  6  |  7  |  8  |  9  |  10 |  11 |  // set_index 1
-//  |-----------------------------------|
-//  |  12 |  13 |  14 |  15 |  16 |  17 |  // set_index 2
-//  |-----------------------------------|
-//  |  18 |  19 |  20 |  21 |  22 |  23 |  // set_index 3
-//  |-----------/-----\-----------------|
-//             /       \
-//            /         \--------> 20 is the cache block index
-//           /           \
-//          /             \
-//         |---------------|
-//         | 3 | 2 | 1 | 0 | // a block contains 4 sectors
-//         |---------|-----|
-//                   |--------> 1 is the sector offset in the 20-th cache block
 struct line_cache_block : public cache_block_t {
+    /*初始化cacheLine状态为INVALID，m_readable为true*/
     line_cache_block() {
         m_alloc_time = 0;
         m_fill_time = 0;
@@ -221,13 +225,19 @@ struct line_cache_block : public cache_block_t {
         m_block_addr = block_addr;
         m_alloc_time = time;
         m_last_access_time = time;
+        /*等待数据回填 */
         m_fill_time = 0;
+        /*把cacheLine状态修改为RESERVED */
         m_status = RESERVED;
         m_ignore_on_fill_status = false;
         m_set_modified_on_fill = false;
         m_set_readable_on_fill = false;
         m_set_byte_mask_on_fill = false;
     }
+
+    /**
+     * 数据回填时修改fill_time
+     */
     virtual void fill(unsigned time, mem_access_sector_mask_t sector_mask,
                       mem_access_byte_mask_t byte_mask) {
         // if(!m_ignore_on_fill_status)
@@ -242,6 +252,7 @@ struct line_cache_block : public cache_block_t {
 
         m_fill_time = time;
     }
+
     virtual bool is_invalid_line() { return m_status == INVALID; }
     virtual bool is_valid_line() { return m_status == VALID; }
     virtual bool is_reserved_line() { return m_status == RESERVED; }
@@ -308,11 +319,17 @@ struct line_cache_block : public cache_block_t {
     }
 
 private:
+    /*分配时间*/
     unsigned long long m_alloc_time;
+    /*最后一次访问时间 */
     unsigned long long m_last_access_time;
+    /*填充数据的时间 */
     unsigned long long m_fill_time;
+    /*cacheLine的状态*/
     cache_block_state m_status;
     bool m_ignore_on_fill_status;
+
+    /*数据回填时的状态改变要求*/
     bool m_set_modified_on_fill;
     bool m_set_readable_on_fill;
     bool m_set_byte_mask_on_fill;
@@ -322,9 +339,32 @@ private:
     mem_access_byte_mask_t m_dirty_byte_mask;
 };
 
+// 2. 如果是 Sector Cache：每个cache block被进一步细分为若干个sector或称为“扇区”
+//  4 sets, 6 ways, each cache block is split to 4 sectors.
+//  |-----------------------------------|
+//  |  0  |  1  |  2  |  3  |  4  |  5  |  // set_index 0
+//  |-----------------------------------|
+//  |  6  |  7  |  8  |  9  |  10 |  11 |  // set_index 1
+//  |-----------------------------------|
+//  |  12 |  13 |  14 |  15 |  16 |  17 |  // set_index 2
+//  |-----------------------------------|
+//  |  18 |  19 |  20 |  21 |  22 |  23 |  // set_index 3
+//  |-----------/-----\-----------------|
+//             /       \
+//            /         \--------> 20 is the cache block index
+//           /           \
+//          /             \
+//         |---------------|
+//         | 3 | 2 | 1 | 0 | // a block contains 4 sectors
+//         |---------|-----|
+//                   |--------> 1 is the sector offset in the 20-th cache block
 struct sector_cache_block : public cache_block_t {
+    
     sector_cache_block() { init(); }
 
+    /**
+     * 初始化所有扇区状态为INVALID，设置m_readable[i] = true
+     */
     void init() {
         for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; ++i) {
             m_sector_alloc_time[i] = 0;
@@ -347,6 +387,9 @@ struct sector_cache_block : public cache_block_t {
         allocate_line(tag, block_addr, time, sector_mask);
     }
 
+    /**
+     * 设置对应sector_mask的扇区状态为RESERVED
+     */
     void allocate_line(new_addr_type tag, new_addr_type block_addr,
                        unsigned time, mem_access_sector_mask_t sector_mask) {
         // allocate a new line
@@ -355,6 +398,7 @@ struct sector_cache_block : public cache_block_t {
         m_tag = tag;
         m_block_addr = block_addr;
 
+        /*得到扇区索引*/
         unsigned sidx = get_sector_index(sector_mask);
 
         // set sector stats
@@ -368,8 +412,7 @@ struct sector_cache_block : public cache_block_t {
         m_set_byte_mask_on_fill = false;
 
         // set line stats
-        m_line_alloc_time =
-            time; // only set this for the first allocated sector
+        m_line_alloc_time = time; // only set this for the first allocated sector
         m_line_last_access_time = time;
         m_line_fill_time = 0;
     }
@@ -383,8 +426,7 @@ struct sector_cache_block : public cache_block_t {
         m_sector_alloc_time[sidx] = time;
         m_last_sector_access_time[sidx] = time;
         m_sector_fill_time[sidx] = 0;
-        if (m_status[sidx] == MODIFIED) // this should be the case only for
-                                        // fetch-on-write policy //TO DO
+        if (m_status[sidx] == MODIFIED) // this should be the case only for fetch-on-write policy //TO DO
             m_set_modified_on_fill[sidx] = true;
         else
             m_set_modified_on_fill[sidx] = false;
@@ -549,6 +591,9 @@ private:
     bool m_readable[SECTOR_CHUNCK_SIZE];
     mem_access_byte_mask_t m_dirty_byte_mask;
 
+    /*  给出sector_mask，给出对应的扇区索引
+        例如0001返回0，0010返回1，0100返回2，1000返回3
+     */
     unsigned get_sector_index(mem_access_sector_mask_t sector_mask) {
         assert(sector_mask.count() == 1);
         for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; ++i) {
@@ -558,6 +603,7 @@ private:
         return SECTOR_CHUNCK_SIZE; // error
     }
 };
+
 
 enum replacement_policy_t { LRU, FIFO };
 
@@ -569,8 +615,34 @@ enum write_policy_t {
     LOCAL_WB_GLOBAL_WT
 };
 
+/**
+  allocate-on-miss（简写为on-miss）和allocate-on-fill（简写为on-fill）是两种cache resources分配策略
+    * allocate-on-miss分配的资源为:
+    *  - a cache line slot, a MSHR, and a miss queue entry
+    * 即在访问miss的就需要选择一个cache line作为reserved line一直等待data回填
+    * allocate-on-fill分配的资源为:
+    *  - a MSHR and a miss queue entry
+    * 即allocate-on-fill只有required data返回时才选择 victim cache line slot进行驱逐  
+*/
 enum allocation_policy_t { ON_MISS, ON_FILL, STREAMING };
 
+/**
+ * 对于当前cache的write miss是否分配cacheline将策略分为write-allocate和no-write-allocate
+ * 对于当前的cache的write miss是否从下级内存取回将要写入的block将策略分为：fetch-on-write和no-fetch-on-write
+ * fetch-on-write的策略必须等待下级内存取回block后才能处理写入
+ * 
+ * 对于L2的sector cache：
+ *  In fetch-on-write, when we
+    write to a single byte of a sector, the L2 fetches the whole
+    sector then merges the written portion to the sector and sets the
+    sector as modified. In the write-validate policy, no read fetch is
+    required, instead each sector has a bit-wise write-mask. When
+    a write to a single byte is received, it writes the byte to the
+    sector, sets the corresponding write bit and sets the sector as
+    valid and modified.
+    When a modified cache line is evicted, the
+    cache line is written back to the memory along with the write mask
+ */
 enum write_allocate_policy_t {
     NO_WRITE_ALLOCATE,
     WRITE_ALLOCATE,
@@ -1002,71 +1074,15 @@ private:
 };
 
 /**
-+-----------------------------------------------------------+
-|                       tag_array                            |
-+-----------------------------------------------------------+
-|                                                           |
-|  +------------------+          +----------------------+   |
-|  |  Cache Config    | <-------|  cache_config &m_config |  |
-|  +------------------+          +----------------------+   |
-|                                                           |
-|  +------------------+          +----------------------+   |
-|  |   Cache Lines    | <-------|  cache_block_t **m_lines |  |
-|  |                  |          |   (2D array)        |   |
-|  |   (nbanks x nset x assoc)    +----------------------+   |
-|  +------------------+                                      |
-|                                                           |
-|  +------------------+                                     |
-|  |  Performance     |                                     |
-|  |  Counters        |                                     |
-|  |                  |                                     |
-|  |  m_access        |  (Total Access)                    |
-|  |  m_miss          |  (Total Misses)                   |
-|  |  m_dirty         |  (Dirty Blocks)                   |
-|  |  m_pending_hit    | (Pending Hits)                   |
-|  |  m_res_fail      |  (Resource Failures)             |
-|  +------------------+                                     |
-|                                                           |
-|  +------------------+                                     |
-|  |  Stats           |                                     |
-|  |                  |                                     |
-|  |  get_stats()     |                                     |
-|  |  windowed_miss_rate() |                                 |
-|  +------------------+                                     |
-|                                                           |
-+-----------------------------------------------------------+
-                              |
-                              | Access Request (Read/Write)
-                              v
-                    +---------------------+
-                    |  Probe Cache Line   |
-                    |  - Check if address |
-                    |    exists           |
-                    +---------------------+
-                              |
-                +-------------+-------------+
-                |                           |
-            Cache Hit                     Cache Miss
-                |                           |
-                v                           v
-        +-------------------+        +------------------+
-        |  Fill Cache Block |        |   Fetch from     |
-        |  - Update state   |        |   Lower Memory   |
-        +-------------------+        +------------------+
-                |                           |
-                v                           v
-        +-------------------+        +------------------+
-        |   Access Count++  |        |   Update Pending  |
-        |   Update Miss Count|       |   Lines (if any) |
-        +-------------------+        +------------------+
-
+ * tag_array主要用来建模二维的CacheLine，其核心成员为cache_block_t **m_lines
 */
 class tag_array {
 public:
-    // Use this constructor
+    /*构造函数 */
     tag_array(cache_config &config, int core_id, int type_id);
     ~tag_array();
 
+    /*处理request相关 */
     enum cache_request_status probe(new_addr_type addr, unsigned &idx,
                                     mem_fetch *mf, bool is_write,
                                     bool probe_mode = false) const;
@@ -1129,13 +1145,14 @@ protected:
     cache_block_t **m_lines; 
 
     /*下面是统计数据，使用access()访问时更新*/
+
     /*访问该cache总的次数 */
     unsigned m_access;
     
     /*访问该cache的miss的次数 */
     unsigned m_miss;
 
-    /*访问cache时tag匹配但是data需要等待下级memory回填的请求数量
+    /*访问cache时tag匹配但是data需要等待下级memory回填的request数量
     number of cache miss that hit a line that is allocated but not filled*/
     unsigned m_pending_hit; 
                             
@@ -1147,8 +1164,7 @@ protected:
     /*状态为dirty的cache block的数量 */
     unsigned m_dirty;
 
-    // performance counters for calculating the amount of misses within a time
-    // window
+    // performance counters for calculating the amount of misses within a time window
     unsigned m_prev_snapshot_access;
     unsigned m_prev_snapshot_miss;
     unsigned m_prev_snapshot_pending_hit;
@@ -1651,6 +1667,8 @@ protected:
 
 protected:
     std::string m_name;
+
+    /*不同的cache会有不同的配置文件 */
     cache_config &m_config;
     tag_array *m_tag_array;
     mshr_table m_mshrs;

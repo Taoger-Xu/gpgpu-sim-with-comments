@@ -51,47 +51,6 @@ enum mf_type {
 #undef MF_TUP_END
 
 class memory_config;
-/**
- * +--------------------------------------------------+
-|                     mem_fetch                     |
-+--------------------------------------------------+
-| +----------------------------------------------+   |
-| |                内部成员变量                  |   |
-| |----------------------------------------------|   |
-| | - m_request_uid: 请求唯一标识符             |   |
-| | - m_sid: 线程块ID                            |   |
-| | - m_tpc: 处理器集群ID                        |   |
-| | - m_wid: 线程ID                              |   |
-| | - m_status: 请求状态                         |   |
-| | - m_data_size: 数据大小                      |   |
-| | - m_ctrl_size: 控制信息大小                  |   |
-| | - m_access: mem_access_t对象                 |   |
-| | - m_partition_addr: 分区地址                  |   |
-| | - m_raw_addr: 原始物理地址                    |   |
-| | - m_type: 请求类型                          |   |
-| | - m_timestamp: 创建时的时间戳               |   |
-| | - m_timestamp2: 发送时的时间戳              |   |
-| | - m_icnt_receive_time: 接收时间              |   |
-| | - m_inst: 关联的指令                        |   |
-| +----------------------------------------------+   |
-|                                                  |
-| +------------------------+                       |
-| |      gpgpu_context    | <--- 上下文信息      |
-| +------------------------+                       |
-|                                                  |
-| +----------------------------------------------+   |
-| |                   方法                       |   |
-| |----------------------------------------------|   |
-| | - set_status()       : 设置请求状态          |   |
-| | - set_reply()       : 设置回复状态          |   |
-| | - print(fp)         : 打印访问信息          |   |
-| | - is_write()        : 判断是否为写请求      |   |
-| | - get_addr()        : 获取请求地址          |   |
-| | - get_access_size()  : 获取访问大小         |   |
-| |                  ...                          |   |
-| +----------------------------------------------+   |
-+--------------------------------------------------+
- */
 
 /**
  * mem_fetch用于建模simt core的mem unit同core内部的cache和片外的memory
@@ -199,14 +158,14 @@ private:
     unsigned long long m_status_change;
 
     /*wrap发起的访存行为的建模，包括request type, address, size, mask*/
+    /*m_access包含发起这个request的请求信息*/
     mem_access_t m_access;
     unsigned m_data_size; // how much data is being written
-    unsigned
-        m_ctrl_size; // how big would all this meta data be in hardware (does
+    unsigned m_ctrl_size; // how big would all this meta data be in hardware (does
                      // not necessarily match actual size of mem_fetch)
-    new_addr_type
-        m_partition_addr; // linear physical address *within* dram partition
+    new_addr_type m_partition_addr; // linear physical address *within* dram partition
                           // (partition bank select bits squeezed out)
+                          
     addrdec_t m_raw_addr; // raw physical address (i.e., decoded DRAM
                           // chip-row-bank-column address)
     enum mf_type m_type;
@@ -229,10 +188,10 @@ private:
     const memory_config *m_mem_config;
     unsigned icnt_flit_size;
 
-    mem_fetch *
-        original_mf; // this pointer is set up when a request is divided into
+    mem_fetch *original_mf; // this pointer is set up when a request is divided into
                      // sector requests at L2 cache (if the req size > L2 sector
                      // size), so the pointer refers to the original request
+
     mem_fetch *original_wr_mf; // this pointer refers to the original write req,
                                // when fetch-on-write policy is used
 };

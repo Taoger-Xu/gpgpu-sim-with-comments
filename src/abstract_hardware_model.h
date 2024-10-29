@@ -831,10 +831,13 @@ private:
                      // manual, sec. 5.1.3)
 };
 
+/*用于标记一次访存操作中的数据字节掩码，MAX_MEMORY_ACCESS_SIZE 设置为 128，即每次访存最大数据 128 字节。*/
 const unsigned MAX_MEMORY_ACCESS_SIZE = 128;
 typedef std::bitset<MAX_MEMORY_ACCESS_SIZE> mem_access_byte_mask_t;
+/*一个 cache line 包含 SECTOR_CHUNCK_SIZE = 4 个 sectors*/
 const unsigned SECTOR_CHUNCK_SIZE = 4; // four sectors
 const unsigned SECTOR_SIZE = 32;       // sector is 32 bytes width
+/*用于标记一次访存操作中的 sector 掩码，4 个 sector，每个 sector 有 32 个字节数据*/
 typedef std::bitset<SECTOR_CHUNCK_SIZE> mem_access_sector_mask_t;
 #define NO_PARTIAL_WRITE (mem_access_byte_mask_t())
 

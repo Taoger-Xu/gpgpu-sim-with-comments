@@ -392,8 +392,7 @@ enum concrete_scheduler {
 /**
  * 
  */
-class scheduler_unit { // this can be copied freely, so can be used in std
-                       // containers.
+class scheduler_unit { // this can be copied freely, so can be used in std containers.
 public:
     scheduler_unit(shader_core_stats *stats, shader_core_ctx *shader,
                    Scoreboard *scoreboard, simt_stack **simt,
@@ -420,6 +419,10 @@ public:
     // all the derived schedulers.  The scheduler's behaviour can be
     // modified by changing the contents of the m_next_cycle_prioritized_warps
     // list.
+    /**
+     * 核心调度器cycle()方法是指在所有派生调度器之间通用。可以通过更改m_next_cycle_prioritized_warps
+     * 列表的内容来修改调度程序的行为
+     */
     void cycle();
 
     // These are some common ordering fucntions that the
@@ -485,7 +488,10 @@ protected:
     shader_core_ctx *m_shader;
     // these things should become accessors: but would need a bigger rearchitect
     // of how shader_core_ctx interacts with its parts.
+
+    /*每个SIMT Core都有一个记分牌*/
     Scoreboard *m_scoreboard;
+    /*每个SIMT堆栈对应一个warp*/
     simt_stack **m_simt_stack;
     // warp_inst_t** m_pipeline_reg;
     std::vector<shd_warp_t *> *m_warp;
@@ -499,6 +505,7 @@ protected:
     unsigned m_num_issued_last_cycle;
     unsigned m_current_turn_warp;
 
+    /*调度器单元的唯一标识ID*/
     int m_id;
 };
 
@@ -1777,6 +1784,7 @@ public:
     // Jin: concurrent kernel on sm
     bool gpgpu_concurrent_kernel_sm;
 
+    /*通过配置文件中：-gpgpu_perfect_inst_const_cache 1指定，不产生L1-Icache的访问数据*/
     bool perfect_inst_const_cache;
     unsigned inst_fetch_throughput;
     unsigned reg_file_port_throughput;
@@ -2142,6 +2150,9 @@ private:
     const memory_config *m_memory_config;
 };
 
+/**
+ * Simt core的建模
+ */
 class shader_core_ctx : public core_t {
 public:
     // creator:
@@ -2150,8 +2161,7 @@ public:
                     const shader_core_config *config,
                     const memory_config *mem_config, shader_core_stats *stats);
 
-    // used by simt_core_cluster:
-    // modifiers
+    // used by simt_core_cluster: modifiers
     /*按照流水线相反的顺序把所有阶段调用一遍*/
     void cycle();
     void reinit(unsigned start_thread, unsigned end_thread,
@@ -2164,6 +2174,8 @@ public:
     void accept_ldst_unit_response(class mem_fetch *mf);
     void broadcast_barrier_reduction(unsigned cta_id, unsigned bar_id,
                                      warp_set_t warps);
+    
+    /*设置该simt core运行该kernel*/
     void set_kernel(kernel_info_t *k) {
         assert(k);
         m_kernel = k;
@@ -2171,6 +2183,7 @@ public:
         printf("GPGPU-Sim uArch: Shader %d bind to kernel %u \'%s\'\n", m_sid,
                m_kernel->get_uid(), m_kernel->name().c_str());
     }
+    
     PowerscalingCoefficients *scaling_coeffs;
     // accessors
     bool fetch_unit_response_buffer_full() const;

@@ -841,6 +841,23 @@ const unsigned SECTOR_SIZE = 32;       // sector is 32 bytes width
 typedef std::bitset<SECTOR_CHUNCK_SIZE> mem_access_sector_mask_t;
 #define NO_PARTIAL_WRITE (mem_access_byte_mask_t())
 
+/**
+ * 下面复杂的宏展开主要是实现了如下功能：
+ * enum mem_access_type {
+    GLOBAL_ACC_R,
+    LOCAL_ACC_R,
+    CONST_ACC_R,
+    TEXTURE_ACC_R,
+    GLOBAL_ACC_W,
+    LOCAL_ACC_W,
+    L1_WRBK_ACC,
+    L2_WRBK_ACC,
+    INST_ACC_R,
+    L1_WR_ALLOC_R,
+    L2_WR_ALLOC_R,
+    NUM_MEM_ACCESS_TYPE
+};
+ */
 #define MEM_ACCESS_TYPE_TUP_DEF                                                \
     MA_TUP_BEGIN(mem_access_type)                                              \
     MA_TUP(GLOBAL_ACC_R), MA_TUP(LOCAL_ACC_R), MA_TUP(CONST_ACC_R),            \
@@ -881,8 +898,8 @@ enum cache_operator_type {
 
 /**
  *  mem_access_t用于建模wrap发起的memory request，其主要功能为:
- *  Coalesced memory access from a warp
-    Consumed in ldst_unit
+ *   - Coalesced memory access from a warp
+ *   - Consumed in ldst_unit
     该类常为类 mem_fetch 的参数，在每一次访存中进行实例化
  */
 class mem_access_t {
@@ -963,10 +980,13 @@ private:
 
     /*该次访存操作的唯一 ID*/
     unsigned m_uid;
+
     /*访存地址*/
     new_addr_type m_addr;
+
     /*1-写，0-读*/
     bool m_write;
+
     /*访存数据大小，以byte为单位*/
     unsigned m_req_size;
     /**
@@ -981,14 +1001,17 @@ private:
         MA_TUP(INST_ACC_R), 从指令缓存读
     */
     mem_access_type m_type;
+
     /*active masks of threads inside warp accessing the memory*/
+    /*即因为 branch and memory divergences导致一个wrap中不是所有线程都有访存请求 */
     active_mask_t m_warp_mask;
+
     /**
      * mem_access_byte_mask_t 访存数据字节掩码定义：
      *  const unsigned MAX_MEMORY_ACCESS_SIZE = 128;
      *  typedef std::bitset<MAX_MEMORY_ACCESS_SIZE> mem_access_byte_mask_t;
      * 用于标记一次访存操作中的数据字节掩码，MAX_MEMORY_ACCESS_SIZE 设置为 128，
-     * 即每次访存最大数据 128 字节。
+     * 即每次访存最大数据 128 字节，128 byte也是cache line的大小
      */
     mem_access_byte_mask_t m_byte_mask;
 
@@ -1419,6 +1442,8 @@ protected:
     bool m_per_scalar_thread_valid;
     std::vector<per_thread_info> m_per_scalar_thread;
     bool m_mem_accesses_created;
+
+    /*该指令对应的访问操作*/
     std::list<mem_access_t> m_accessq;
 
     /**issue这条指令的scheduler id */

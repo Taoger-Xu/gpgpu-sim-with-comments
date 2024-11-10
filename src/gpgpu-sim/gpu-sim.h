@@ -372,6 +372,8 @@ public:
         m_valid = false;
         gpgpu_ctx = ctx;
     }
+
+    /*从配置文件中初始化整个gpgpu_sim_config*/
     void reg_options(class OptionParser *opp);
     void init() {
         gpu_stat_sample_freq = 10000;

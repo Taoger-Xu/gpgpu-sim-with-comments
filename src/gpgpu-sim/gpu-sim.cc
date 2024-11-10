@@ -678,6 +678,9 @@ void shader_core_config::reg_options(class OptionParser *opp) {
     }
 }
 
+/**
+ * 
+ */
 void gpgpu_sim_config::reg_options(option_parser_t opp) {
     gpgpu_functional_sim_config::reg_options(opp);
     m_shader_config.reg_options(opp);
@@ -2068,6 +2071,11 @@ int gpgpu_sim::next_clock_domain(void) {
 /**
  * 轮询所有的simt core cluster，都执行一遍simt_core_cluster::issue_block2core()
  * 使用m_last_cluster_issue记录最后一次执行CTA的cluster id
+ * Issuing a thread block的调用层次如下：
+ * gpgpu_sim::cycle()
+        gpgpu_sim::issue_block2core()
+            simt_core_cluster::issue_block2core()
+                shader_core_ctx::issue_block2core()
  */
 void gpgpu_sim::issue_block2core() {
     unsigned last_issued = m_last_cluster_issue;

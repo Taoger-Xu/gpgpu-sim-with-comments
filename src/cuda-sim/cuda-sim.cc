@@ -2132,6 +2132,7 @@ ptx_sim_kernel_info(const function_info *kernel) {
     return kernel->get_kernel_info();
 }
 
+/*从function模拟器中根据pc获取warp_inst_t对象 */
 const warp_inst_t *gpgpu_context::ptx_fetch_inst(address_type pc) {
     return pc_to_instruction(pc);
 }

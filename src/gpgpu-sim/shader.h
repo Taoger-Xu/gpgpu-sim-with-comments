@@ -102,7 +102,7 @@ public:
 };
 
 /**
- * shd_warp_t主要建模完成decode()后wrap的状态信息:
+ * shd_warp_t主要建模完成decode()后wrap的状态信息，即hardware wrap
  *  - 一个wrap的时序状态
  *  - 一个wrap拥有的I-Buffer
  * 同时shd_warp_t拥有一堆flags标志该wrap能否被issue()
@@ -273,7 +273,11 @@ public:
         return (num_inst_in_pipeline() - num_inst_in_buffer());
     }
     bool inst_in_pipeline() const { return m_inst_in_pipeline > 0; }
+    
+    /*在wrap完后decode()时调用，即增加在simd流水线的指令数量 */
     void inc_inst_in_pipeline() { m_inst_in_pipeline++; }
+
+    /*指令在simd单元执行完毕 */
     void dec_inst_in_pipeline() {
         assert(m_inst_in_pipeline > 0);
         m_inst_in_pipeline--;
@@ -314,10 +318,13 @@ private:
             m_inst = NULL;
         }
         const warp_inst_t *m_inst;
+        /*该指令是否有效 */
         bool m_valid;
     };
 
     warp_inst_t m_inst_at_barrier;
+
+    /*每个wrap都拥有固定数量的i-buffer entry */
     ibuffer_entry m_ibuffer[IBUFFER_SIZE];
     unsigned m_next;
 
@@ -331,6 +338,7 @@ private:
 
     unsigned m_stores_outstanding; // number of store requests sent but not yet
                                    // acknowledged
+    /*完成decode即将进入simd单元执行的指令数量 */
     unsigned m_inst_in_pipeline;
 
     // Jin: cdp support
@@ -1154,7 +1162,7 @@ public:
     simd_function_unit(const shader_core_config *config);
     ~simd_function_unit() { delete m_dispatch_reg; }
 
-    // modifiers
+    /*把指令发射到simd单元执行，即把source_reg对应的流水线寄存器的指令移入m_dispatch_reg寄存器，同时可能修改记分牌*/
     virtual void issue(register_set &source_reg);
     virtual void cycle() = 0;
     virtual void active_lanes_in_pipeline() = 0;
@@ -1210,10 +1218,10 @@ public:
     pipelined_simd_unit(register_set *result_port,
                         const shader_core_config *config, unsigned max_latency,
                         shader_core_ctx *core, unsigned issue_reg_id);
-
-    // modifiers
+    
     /*流水线单元向前推进一拍，模拟指令的bandwidth和latency */
     virtual void cycle();
+
     /*把source_reg对应的流水线寄存器的指令移入m_dispatch_reg寄存器 */
     virtual void issue(register_set &source_reg);
     virtual unsigned get_active_lanes_in_pipeline();
@@ -1408,7 +1416,7 @@ class shader_core_mem_fetch_allocator;
 class cache_t;
 
 /**
- * Instantiates and operates on all in-core memories
+ * 包含四种on-chip memory
     – Texture cache: m_L1T
     – Constant cache: m_L1C
     – Data cache: m_L1D
@@ -1435,6 +1443,7 @@ public:
              std::map<unsigned /*pc*/,
                       std::map<unsigned /*addr*/, unsigned /*count*/>>>
         m_pending_ldgsts;
+
     // modifiers
     virtual void issue(register_set &inst);
     bool is_issue_partitioned() { return false; }
@@ -1525,17 +1534,22 @@ protected:
     tex_cache *m_L1T;       // texture cache
     read_only_cache *m_L1C; // constant cache
     l1_cache *m_L1D;        // data cache
-    std::map<unsigned /*warp_id*/,
-             std::map<unsigned /*regnum*/, unsigned /*count*/>>
-        m_pending_writes;
+    
+    /*二维矩阵，用wrap id和reg id来索引在寄存器执行写操作的指令数量，在ldst::issue()时增加，在writeback时减少 */
+    std::map<unsigned /*warp_id*/,std::map<unsigned /*regnum*/, unsigned /*count*/>> m_pending_writes;
+
+    /*接收 SIMT Core Cluster 的 m_response_fifo 发送的 mf 访存数据包(mem_fetch)。
+    SIMT Core Cluster 还会向 L1I Cache 发送 INST_ACC_R 类型的访存数据包*/
     std::list<mem_fetch *> m_response_fifo;
+
     opndcoll_rfu_t *m_operand_collector;
     Scoreboard *m_scoreboard;
 
     mem_fetch *m_next_global;
+
+    /*下一条要writeback的指令 */
     warp_inst_t m_next_wb;
-    unsigned m_writeback_arb; // round-robin arbiter for writeback contention
-                              // between L1T, L1C, shared
+    unsigned m_writeback_arb; // round-robin arbiter for writeback contention between L1T, L1C, shared
     unsigned m_num_writeback_clients;
 
     enum mem_stage_stall_type m_mem_rc;
@@ -2606,8 +2620,7 @@ protected:
 
     virtual void create_shd_warp() = 0;
 
-    virtual const warp_inst_t *get_next_inst(unsigned warp_id,
-                                             address_type pc) = 0;
+    virtual const warp_inst_t *get_next_inst(unsigned warp_id, address_type pc) = 0;
     virtual void get_pdom_stack_top_info(unsigned warp_id,
                                          const warp_inst_t *pI, unsigned *pc,
                                          unsigned *rpc) = 0;
@@ -2694,8 +2707,7 @@ protected:
     unsigned m_num_function_units;
     std::vector<unsigned> m_dispatch_port;
     std::vector<unsigned> m_issue_port;
-    std::vector<simd_function_unit *>
-        m_fu; // stallable pipelines should be last in this array
+    std::vector<simd_function_unit *> m_fu; // stallable pipelines should be last in this array
     ldst_unit *m_ldst_unit;
     static const unsigned MAX_ALU_LATENCY = 512;
     unsigned num_result_bus;

@@ -61,6 +61,8 @@ enum cache_block_state { INVALID = 0, RESERVED, VALID, MODIFIED };
  * HIT_RESERVED：tag命中，表示当前cache的数据块正在回填，不需要向下级memory发送请求，只需要等待data response
  * MISS：tag不命中，需要向下级发送memory request
  * RESERVATION_FAIL：cache miss，并且当前cache不能分配更多的资源比如mshr去处理该miss
+ * SECTOR_MISS：tag命中，当前的读请求无法读取当前为MODIFIED的sector的data，需要向下级发送read request取回数据；
+ *                      或者当前sector为invalid，但是sector所处的line含有不是invalid的sector
  */
 enum cache_request_status {
     HIT = 0,
@@ -152,9 +154,9 @@ struct cache_block_t {
 
     /*修改cacheline的状态*/
     virtual void allocate(new_addr_type tag, new_addr_type block_addr,
-                          unsigned time,
-                          mem_access_sector_mask_t sector_mask) = 0;
+                          unsigned time,mem_access_sector_mask_t sector_mask) = 0;
     
+    /*请求得到响应，回填cache line */
     virtual void fill(unsigned time, mem_access_sector_mask_t sector_mask,
                       mem_access_byte_mask_t byte_mask) = 0;
     
@@ -189,6 +191,7 @@ struct cache_block_t {
     virtual void print_status() = 0;
     virtual ~cache_block_t() {}
 
+    /*无论是line cache还是sector cache，一个cache line都只有一个tag */
     new_addr_type m_tag;
     new_addr_type m_block_addr;
 };
@@ -334,8 +337,10 @@ private:
     bool m_set_readable_on_fill;
     bool m_set_byte_mask_on_fill;
 
-    /*标记该cache block是否可读 */
+    /*标记该cache block是否可读，为false即表示需要向下级发送read request取回数据 */
     bool m_readable;
+
+    /*支持write的粒度为1 byte的write mask */
     mem_access_byte_mask_t m_dirty_byte_mask;
 };
 
@@ -358,6 +363,11 @@ private:
 //         | 3 | 2 | 1 | 0 | // a block contains 4 sectors
 //         |---------|-----|
 //                   |--------> 1 is the sector offset in the 20-th cache block
+
+/**
+ * 当发生对一个扇区的未命中时，缓存会将一个现存的扇区逐出，将地址标签（tag）设置为新扇区的地址，并且仅加载一个子扇区。
+ * 当发生对一个子扇区的未命中，但包含该子扇区的扇区已在缓存中时，只有所需的那个子扇区会被加载
+ */
 struct sector_cache_block : public cache_block_t {
     
     sector_cache_block() { init(); }
@@ -417,6 +427,7 @@ struct sector_cache_block : public cache_block_t {
         m_line_fill_time = 0;
     }
 
+    /*把对应sector的状态修改为RESERVED */
     void allocate_sector(unsigned time, mem_access_sector_mask_t sector_mask) {
         // allocate invalid sector of this allocated valid line
         assert(is_valid_line());
@@ -443,6 +454,9 @@ struct sector_cache_block : public cache_block_t {
         m_line_fill_time = 0;
     }
 
+    /**
+     * 修改对应sector的fill time
+     */
     virtual void fill(unsigned time, mem_access_sector_mask_t sector_mask,
                       mem_access_byte_mask_t byte_mask) {
         unsigned sidx = get_sector_index(sector_mask);
@@ -461,6 +475,8 @@ struct sector_cache_block : public cache_block_t {
         m_sector_fill_time[sidx] = time;
         m_line_fill_time = time;
     }
+    
+    /*所有的sector都为INVALID才返回true */
     virtual bool is_invalid_line() {
         // all the sectors should be invalid
         for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; ++i) {
@@ -469,7 +485,11 @@ struct sector_cache_block : public cache_block_t {
         }
         return true;
     }
+
+    /*只要有一个sector不为INVALID即返回true */
     virtual bool is_valid_line() { return !(is_invalid_line()); }
+
+    /*只要有一个sector为RESERVED即返回true*/
     virtual bool is_reserved_line() {
         // if any of the sector is reserved, then the line is reserved
         for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; ++i) {
@@ -478,8 +498,9 @@ struct sector_cache_block : public cache_block_t {
         }
         return false;
     }
+
+    /*只要有一个sector为MODIFIED即返回true*/
     virtual bool is_modified_line() {
-        // if any of the sector is modified, then the line is modified
         for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; ++i) {
             if (m_status[i] == MODIFIED)
                 return true;
@@ -488,6 +509,8 @@ struct sector_cache_block : public cache_block_t {
     }
 
     virtual enum cache_block_state
+
+    /*得到该sector对应的状态 */
     get_status(mem_access_sector_mask_t sector_mask) {
         unsigned sidx = get_sector_index(sector_mask);
 
@@ -551,12 +574,15 @@ struct sector_cache_block : public cache_block_t {
         unsigned sidx = get_sector_index(sector_mask);
         m_set_readable_on_fill[sidx] = readable;
     }
+    
+    /** */
     virtual void set_m_readable(bool readable,
                                 mem_access_sector_mask_t sector_mask) {
         unsigned sidx = get_sector_index(sector_mask);
         m_readable[sidx] = readable;
     }
 
+    /* */
     virtual bool is_readable(mem_access_sector_mask_t sector_mask) {
         unsigned sidx = get_sector_index(sector_mask);
         return m_readable[sidx];
@@ -580,19 +606,26 @@ private:
     unsigned m_sector_alloc_time[SECTOR_CHUNCK_SIZE];
     unsigned m_last_sector_access_time[SECTOR_CHUNCK_SIZE];
     unsigned m_sector_fill_time[SECTOR_CHUNCK_SIZE];
+
     unsigned m_line_alloc_time;
     unsigned m_line_last_access_time;
     unsigned m_line_fill_time;
+
     cache_block_state m_status[SECTOR_CHUNCK_SIZE];
     bool m_ignore_on_fill_status[SECTOR_CHUNCK_SIZE];
     bool m_set_modified_on_fill[SECTOR_CHUNCK_SIZE];
     bool m_set_readable_on_fill[SECTOR_CHUNCK_SIZE];
     bool m_set_byte_mask_on_fill;
+
+    /*表示当前sector不可读，需要向下级发送一个read request取回对应sector的数据 */
     bool m_readable[SECTOR_CHUNCK_SIZE];
+
+    /*针对写粒度为1 byte的 write mask */
     mem_access_byte_mask_t m_dirty_byte_mask;
 
     /*  给出sector_mask，给出对应的扇区索引
         例如0001返回0，0010返回1，0100返回2，1000返回3
+        每一个tag只能命中一个sector
      */
     unsigned get_sector_index(mem_access_sector_mask_t sector_mask) {
         assert(sector_mask.count() == 1);
@@ -650,6 +683,7 @@ enum write_allocate_policy_t {
     LAZY_FETCH_ON_READ
 };
 
+/*在GV100的MSHR type上，L1D为ASSOC，L2D为ASSOC，L1I为SECTOR_ASSOC*/
 enum mshr_config_t {
     TEX_FIFO,        // Tex cache
     ASSOC,           // normal cache
@@ -1470,85 +1504,6 @@ bool was_writeallocate_sent(const std::list<cache_event> &events);
 
 /**
  * baseline_cache实现read_only_cache和data_cache通用功能，其子类需要实现自己的access()函数
- * +----------------------------------------------------------+
-|                     baseline_cache                        |
-+----------------------------------------------------------+
-|                                                          |
-|  +------------------+          +----------------------+  |
-|  |   Cache Config   | <-------|  cache_config &m_config | |
-|  +------------------+          +----------------------+  |
-|                                                          |
-|  +------------------+          +----------------------+  |
-|  |    Tag Array     | <-------|  tag_array *m_tag_array | |
-|  +------------------+          +----------------------+  |
-|                                                          |
-|  +------------------+          +----------------------+  |
-|  |     MSHR Table   | <-------|  mshr_table m_mshrs   | |
-|  +------------------+          +----------------------+  |
-|                                                          |
-|  +------------------+                                   |
-|  |  Bandwidth       |                                   |
-|  |  Management      | <----------------------------+   |
-|  |  m_bandwidth_management |                           |   |
-|  +------------------+                                   |   |
-|                                                          |
-|  +------------------+                                   |
-|  |   Memory Port    | <----------------------------+   |
-|  |  mem_fetch_interface *m_memport |                  |   |
-|  +------------------+                                   |
-|                                                          |
-|  +------------------+                                   |
-|  |   Miss Queue     |                                   |
-|  |  std::list<mem_fetch *> m_miss_queue |             |
-|  +------------------+                                   |
-|                                                          |
-|  +------------------+                                   |
-|  |    Statistics     |                                   |
-|  |  cache_stats m_stats |                             |
-|  +------------------+                                   |
-|                                                          |
-|  +------------------+                                   |
-|  |   Extra Fields    |                                   |
-|  |  extra_mf_fields_lookup m_extra_mf_fields |         |
-|  +------------------+                                   |
-|                                                          |
-+----------------------------------------------------------+
-                              |
-                              | Access Request (Read/Write)
-                              v
-                    +-----------------------+
-                    |      Access()         |
-                    | - Check status        |
-                    +-----------------------+
-                              |
-                +-------------+-------------+
-                |                           |
-            Cache Hit                     Cache Miss
-                |                           |
-                v                           v
-        +-------------------+        +------------------+
-        |  Fill Cache Block |        |   Send Read      |
-        |  - Update state   |        |   Request to     |
-        +-------------------+        |   Lower Memory   |
-                |                   +------------------+
-                v                           |
-        +-------------------+               v
-        |   Update Stats    |        +-------------------+
-        |   (m_stats)       |        |   Update MSHR     |
-        +-------------------+        |   - Add to Queue   |
-                |                   +-------------------+
-                v
-        +-------------------+
-        |   Access Ready?   | <----+
-        |                   |       |
-        +-------------------+       |
-                |                   |
-                v                   |
-        +-------------------+       |
-        |   Return Response  | <----+
-        |   (m_mshrs)       |
-        +-------------------+
-
  */
 class baseline_cache : public cache_t {
 public:
@@ -1591,9 +1546,11 @@ public:
      * 即把mem_fetch从m_miss_queue移动到m_memport
      * */
     void cycle();
-    /// Interface for response from lower memory level (model bandwidth
-    /// restictions in caller)
+
+    // Interface for response from lower memory level (model bandwidth restictions in caller)
+    /*用于处理来自lower memory level的内存响应 */
     void fill(mem_fetch *mf, unsigned time);
+
     /// Checks if mf is waiting to be filled by lower memory level
     bool waiting_for_fill(mem_fetch *mf);
 
@@ -1688,6 +1645,9 @@ protected:
     cache_gpu_level m_level;
     gpgpu_sim *m_gpu;
 
+    /**
+     * 存一些memory request额外的信息，比如cache set index，方便计算
+     */
     struct extra_mf_fields {
         extra_mf_fields() { m_valid = false; }
         extra_mf_fields(new_addr_type a, new_addr_type ad, unsigned i,
@@ -1704,6 +1664,7 @@ protected:
         bool m_valid;
         new_addr_type m_block_addr;
         new_addr_type m_addr;
+        /*在on-miss策略中，之前分配的cacheLine通过参数*/
         unsigned m_cache_index;
         unsigned m_data_size;
         // this variable is used when a load request generates multiple load
@@ -1722,6 +1683,7 @@ protected:
     bool miss_queue_full(unsigned num_miss) {
         return ((m_miss_queue.size() + num_miss) >= m_config.m_miss_queue_size);
     }
+
     /// Read miss handler without writeback
     void send_read_request(new_addr_type addr, new_addr_type block_addr,
                            unsigned cache_index, mem_fetch *mf, unsigned time,
@@ -1794,7 +1756,9 @@ protected:
                          new_tag_array) {}
 };
 
-/// Data cache - Implements common functions for L1 and L2 data cache
+/**
+ * Data cache - Implements common functions for L1 and L2 data cache
+ */
 class data_cache : public baseline_cache {
 public:
     data_cache(const char *name, cache_config &config, int core_id, int type_id,
@@ -1882,10 +1846,10 @@ protected:
         m_gpu = gpu;
     }
 
-    mem_access_type m_wr_alloc_type; // Specifies type of write allocate request
-                                     // (e.g., L1 or L2)
-    mem_access_type
-        m_wrbk_type; // Specifies type of writeback request (e.g., L1 or L2)
+    /*由于L1/L2 cache在write miss / hit 采用的策略不一样 */
+    mem_access_type m_wr_alloc_type; // Specifies type of write allocate request (e.g., L1 or L2)
+    mem_access_type m_wrbk_type; // Specifies type of writeback request (e.g., L1 or L2)
+
     class gpgpu_sim *m_gpu;
 
     //! A general function that takes the result of a tag_array probe
@@ -1904,6 +1868,7 @@ protected:
     void send_write_request(mem_fetch *mf, cache_event request, unsigned time,
                             std::list<cache_event> &events);
     void update_m_readable(mem_fetch *mf, unsigned cache_index);
+    
     // Member Function pointers - Set by configuration options
     // to the functions below each grouping
     /******* Write-hit configs *******/
@@ -1987,6 +1952,16 @@ protected:
 /// It is write-evict (global) or write-back (local) at
 /// the granularity of individual blocks
 /// (the policy used in fermi according to the CUDA manual)
+// L1 cache采取的写策略：
+//     对L1 cache写不命中时，采用write-allocate策略，将缺失块从下级存储调入L1 cache，
+//                          并在L1 cache中修改。
+//     对L1 cache写命中时，采用write-back策略，只写入L1 cache，不直接写入下级存储，在
+//                          L1 cache的sector被逐出时才将数据写回下级缓存。
+// L2 cache采取的写策略：
+//     对L2 cache写不命中时，采用write-allocate策略，将缺失块从DRAM调入L2 cache，并在
+//                          L2 cache中修改。
+//     对L2 cache写命中时，采用write-back策略，只写入L2 cache，并不直接写入DRAM，在L2 
+//                          cache的sector被逐出时才将数据写回DRAM。
 class l1_cache : public data_cache {
 public:
     l1_cache(const char *name, cache_config &config, int core_id, int type_id,

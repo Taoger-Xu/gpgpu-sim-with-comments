@@ -44,8 +44,9 @@ class gpgpu_context {
   unsigned long long g_ptx_cta_info_uid;
   unsigned symbol_sm_next_uid;  // uid for symbol
   unsigned function_info_sm_next_uid;
-  std::vector<ptx_instruction *>
-      s_g_pc_to_insn;  // a direct mapping from PC to instruction
+
+  /*a direct mapping from PC to instruction，直接通过pc获得ptx_instruction*/
+  std::vector<ptx_instruction *> s_g_pc_to_insn; 
   bool debug_tensorcore;
 
   // objects pointers for each file
@@ -86,7 +87,11 @@ class gpgpu_context {
   /*任何first CUDA/OpenCL API call都会调用GPGPUSim_Init()对整个gpgpusim进行初始化 */
   struct _cuda_device_id *GPGPUSim_Init();
   void ptx_reg_options(option_parser_t opp);
+
+  /*被下面的ptx_fetch_inst(address_type pc)调用*/
   const ptx_instruction *pc_to_instruction(unsigned pc);
+
+  /*从function模拟器中根据pc获取warp_inst_t对象，实现在cuda-sim.cc中 */
   const warp_inst_t *ptx_fetch_inst(address_type pc);
   unsigned translate_pc_to_ptxlineno(unsigned pc);
 };

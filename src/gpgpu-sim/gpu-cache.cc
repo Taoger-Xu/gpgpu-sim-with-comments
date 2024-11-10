@@ -266,8 +266,10 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
                                            bool is_write, bool probe_mode,
                                            mem_fetch *mf) const {
     // assert( m_config.m_write_policy == READ_ONLY );
+
     /*m_config.set_index(addr) 是返回一个地址 addr 在 Cache 中的 set index。这里的 set index 有一整套的映射函数*/
     unsigned set_index = m_config.set_index(addr);
+
     /*tag 返回addr对应的标签*/
     new_addr_type tag = m_config.tag(addr);
 
@@ -303,14 +305,13 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
                 return HIT;
             } else if (line->get_status(mask) == MODIFIED) {
                 /**
-                 * L1 cache与L2cache write hit时，采用write-back策略，只将数据写入该block，并不直接更新下级存储，
+                 * L1 cache与L2 cache write hit时，采用write-back策略，只将数据写入该block，并不直接更新下级存储，
                  * 只有当这个块被替换时，才将数据写回下级存储
                  * MODIFIED，说明该 block 或 sector的数据已经被其他线程修改。
-                 * 如果当前访问也是写操作的话即为写命中，直接覆盖写即可，即write hit，不需要考虑一致性的问题
-                 * 
-                 * 但如果不是写操作则需要通过m_readable数组确定cache block 或 cache sector是否已被修改完毕并可读
-                 * is_readable(mask)是判断当前cache block是否可读，因为 MODIFIED表示该cache block被其他线程修改，is_readable用来表示是否修改完毕
-                 * 其中line cache和sector的is_readable(mask)实现不同。
+                 * 如果当前访问也是写操作的话即为写命中，直接覆盖写即可，即write hit，不需要考虑一致性的问题。
+                 * When a sector read request is received to a modified sector, 
+                 * it first checks if the sector write-mask is complete, i.e. 
+                 * all the bytes have been written to and the line is fully readable
                 */
                 if ((!is_write && line->is_readable(mask)) || is_write) {
                     idx = index;
@@ -322,9 +323,10 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
 
             } 
             /**
-             * 下面的分支用于处理sector cache
-             * sector cache只要有一个valid即判断is_valid_line()为true
-             * 但是mask对应的sector状态为INVALID，即返回SECTOR_MISS
+             * 下面的分支用于处理sector cache，即line为INVALID
+             * 那么对于line cache，line->is_valid_line()即返回false
+             * 但是对于sector cache，只要有一个sector不为INVALID即返回true
+             * 判断为：当前sector为invalid，但是sector所处的line含有不是invalid的sector
             */
             else if (line->is_valid_line() &&
                        line->get_status(mask) == INVALID) {
@@ -480,10 +482,15 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
         m_sector_miss++;
         /*log cache misses */
         shader_cache_access_log(m_core_id, m_type_id, 1); 
+
+        /* */
         if (m_config.m_alloc_policy == ON_MISS) {
+            /*该line有sector状态为modified*/
             bool before = m_lines[idx]->is_modified_line();
+            /*把对应sector的状态改为RESERVED */
             ((sector_cache_block *)m_lines[idx])
                 ->allocate_sector(time, mf->get_access_sector_mask());
+            /*修改完后该line所有的sector状态都不为modified */
             if (before && !m_lines[idx]->is_modified_line()) {
                 m_dirty--;
             }
@@ -566,8 +573,7 @@ void tag_array::fill(unsigned index, unsigned time, mem_fetch *mf) {
     /*之前选的cacheLine是否为dirty data */
     bool before = m_lines[index]->is_modified_line();
     /* */
-    m_lines[index]->fill(time, mf->get_access_sector_mask(),
-                         mf->get_access_byte_mask());
+    m_lines[index]->fill(time, mf->get_access_sector_mask(),mf->get_access_byte_mask());
     if (m_lines[index]->is_modified_line() && !before) {
         m_dirty++;
     }
@@ -1420,18 +1426,20 @@ void baseline_cache::cycle() {
 
 /**
  * fill()处理接收到lower memory level的响应后如何修改cache block status以及释放对应的mshr entry
+ * 1. 对于sector cache要等待最后一个mf返回才说明取回整个cache line的数据，而对于line cache，返回的mf肯定对应一个cache line。
  * 
  */
 void baseline_cache::fill(mem_fetch *mf, unsigned time) {
     /**对于sector cache，需要看当前mf是否是一个大mf分割后返回的最后一个小mf；
-     * 对于line cache的话，当前返回mf一定是一整个cache block数据*/
+     * 对于line cache的话，当前返回mf一定是一整个cache line的数据*/
     if (m_config.m_mshr_type == SECTOR_ASSOC) {
         assert(mf->get_original_mf());
-        /*m_extra_mf_fields是hashmap，用来映射mem_fetch-->extra_mf_fields，其中extra_mf_fields中的
-         pending_read字段记录拆分的需要接收的小mf数量*/
+        /*m_extra_mf_fields是hashmap，用来映射mem_fetch-->extra_mf_fields，
+        其中extra_mf_fields中的pending_read字段记录拆分的需要接收的小mf数量*/
         extra_mf_fields_lookup::iterator e =
             m_extra_mf_fields.find(mf->get_original_mf());
         assert(e != m_extra_mf_fields.end());
+        /*直到最后一个 */
         e->second.pending_read--;
         /*丢弃当前mem_fetch，直到最后一个到来*/
         if (e->second.pending_read > 0) {
@@ -1445,12 +1453,19 @@ void baseline_cache::fill(mem_fetch *mf, unsigned time) {
             delete temp;
         }
     }
+
     /*设置最终填充的mem_fetch属性，并将最后得到的mem_fetch填充到cache中 */
     extra_mf_fields_lookup::iterator e = m_extra_mf_fields.find(mf);
     assert(e != m_extra_mf_fields.end());
     assert(e->second.m_valid);
     mf->set_data_size(e->second.m_data_size);
     mf->set_addr(e->second.m_addr);
+
+    /**
+     * (1) allocate-on-miss：当发生未完成的cache miss时，需要为未完成的miss分配cache line slot、MSHR和miss队列条目。
+     * (2) allocate-on-fill：当发生未完成的cache miss时，需要为未完成的miss分配MSHR和miss队列条目，
+     * 但当所需数据从较低内存级别返回时，会选择受害者cache line slot替换
+     */
     if (m_config.m_alloc_policy == ON_MISS)
         m_tag_array->fill(e->second.m_cache_index, time, mf);
     else if (m_config.m_alloc_policy == ON_FILL) {
@@ -1569,6 +1584,7 @@ void baseline_cache::send_read_request(new_addr_type addr,
                                        bool read_only, bool wa) {
     /*mshr_addr用于索引该请求的addr对应的mshr entry，其中Sector Cache和Line Cache有不同的算法*/
     new_addr_type mshr_addr = m_config.mshr_addr(mf->get_addr());
+
     /**
      * 查找是否已经有 mshr_addr 的请求被合并到 MSHR。
      * 需要注意，MSHR 中的条目是以 mshr_addr 为索引的，即来自同一个 line（对于非 Sector Cache）
@@ -1576,6 +1592,7 @@ void baseline_cache::send_read_request(new_addr_type addr,
      * 因为这种 cache 所请求的最小单位分别是一个 line 或者一个 sector
      */
     bool mshr_hit = m_mshrs.probe(mshr_addr);
+
     /**
      * 检查mshr是否还有空间记录新的memory request，要求：
      *  - 当前的addr对应的mshr entry存在，检查是否该entry的内存请求合并数量已达到最大值
@@ -1597,6 +1614,7 @@ void baseline_cache::send_read_request(new_addr_type addr,
         do_miss = true;
 
     } 
+
     /*mshr entry未命中，但是有空闲的mshr entry可以分配*/
     else if (!mshr_hit && mshr_avail &&
                (m_miss_queue.size() < m_config.m_miss_queue_size)) {
@@ -1645,6 +1663,13 @@ void data_cache::send_write_request(mem_fetch *mf, cache_event request,
     mf->set_status(m_miss_queue_status, time);
 }
 
+/**
+ * 只有该sector对应的byte的write mask全部为0，即说明该sector的字节对应的write mask全部清除；
+ * 对于read request通常为32 byte，要求write mask为空
+ * 对于gpgpu-sim 4.0采用的azy fetch-on-read策略，要求：
+ *      1.当一个modified sector接受一个sector read request时，首先只有write-mask全部置1，这样才是readable
+ *      2.如果write mask不空，则向低级内存发送该sector对应的fetch请求去和write-mask的byte合并，才能标记sector为readable
+ */
 void data_cache::update_m_readable(mem_fetch *mf, unsigned cache_index) {
     cache_block_t *block = m_tag_array->get_block(cache_index);
     for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; i++) {
@@ -1652,12 +1677,14 @@ void data_cache::update_m_readable(mem_fetch *mf, unsigned cache_index) {
             bool all_set = true;
             for (unsigned k = i * SECTOR_SIZE; k < (i + 1) * SECTOR_SIZE; k++) {
                 // If any bit in the byte mask (within the sector) is not set,
-                // the sector is unreadble
+                // the sector is unreadable
                 if (!block->get_dirty_byte_mask().test(k)) {
                     all_set = false;
                     break;
                 }
             }
+
+            /*如果所有的byte mask位全都设置为dirty了，则将该sector可设置为可读，因为当前的 sector已经是全部更新为最新值了*/
             if (all_set)
                 block->set_m_readable(true, mf->get_access_sector_mask());
         }
@@ -1666,19 +1693,30 @@ void data_cache::update_m_readable(mem_fetch *mf, unsigned cache_index) {
 
 /****** Write-hit functions (Set by config file) ******/
 
-/// Write-back hit: Mark block as modified
+// Write-back hit: Mark block as modified
+
+/**
+ * WRITE_BACK策略：只需要将data写入当前cache不需要写入下一级缓存，并标记cacheLine为modified
+ */
 cache_request_status data_cache::wr_hit_wb(new_addr_type addr,
                                            unsigned cache_index, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events,
                                            enum cache_request_status status) {
+    
     new_addr_type block_addr = m_config.block_addr(addr);
     m_tag_array->access(block_addr, time, cache_index, mf); // update LRU state
     cache_block_t *block = m_tag_array->get_block(cache_index);
+
+    /*如果该block之前不是modified，则增加modified的cacheline的数量 */
     if (!block->is_modified_line()) {
         m_tag_array->inc_dirty();
     }
+
+    /*设置对应的sector/block 状态为modified */
     block->set_status(MODIFIED, mf->get_access_sector_mask());
+
+    /*设置write mask */
     block->set_byte_mask(mf);
     update_m_readable(mf, cache_index);
 
@@ -1978,15 +2016,21 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
     }
 }
 
+/**
+ * L2 cache采用lazy fetch-on-read的策略来处理write miss，因为论文发现：
+ * all the reads received by L2 caches from the coalescer are 32-byte sectored accesses. 
+ * Thus, the read access granularity (32 bytes) is different from the write access granularity (one byte).
+ */
 enum cache_request_status data_cache::wr_miss_wa_lazy_fetch_on_read(
     new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
     std::list<cache_event> &events, enum cache_request_status status) {
+    
+
     new_addr_type block_addr = m_config.block_addr(addr);
 
     // if the request writes to the whole cache line/sector, then, write and set
     // cache line Modified. and no need to send read request to memory or
     // reserve mshr
-
     if (miss_queue_full(0)) {
         m_stats.inc_fail_stats(mf->get_access_type(), MISS_QUEUE_FULL,
                                mf->get_streamID());
@@ -2002,6 +2046,7 @@ enum cache_request_status data_cache::wr_miss_wa_lazy_fetch_on_read(
 
     cache_request_status m_status =
         m_tag_array->access(block_addr, time, cache_index, wb, evicted, mf);
+    
     assert(m_status != HIT);
     cache_block_t *block = m_tag_array->get_block(cache_index);
     if (!block->is_modified_line()) {
@@ -2066,24 +2111,34 @@ enum cache_request_status data_cache::wr_miss_no_wa(
 
 /****** Read hit functions (Set by config file) ******/
 
-/// Baseline read hit: Update LRU status of block.
+// Baseline read hit: Update LRU status of block.
 // Special case for atomic instructions -> Mark block as modified
 enum cache_request_status
 data_cache::rd_hit_base(new_addr_type addr, unsigned cache_index, mem_fetch *mf,
                         unsigned time, std::list<cache_event> &events,
                         enum cache_request_status status) {
     new_addr_type block_addr = m_config.block_addr(addr);
+    /*修改LRU状态 */
     m_tag_array->access(block_addr, time, cache_index, mf);
-    // Atomics treated as global read/write requests - Perform read, mark line
-    // as MODIFIED
+    // Atomics treated as global read/write requests - Perform read, mark line as MODIFIED
+    /**
+     * 原子操作从全局存储取值，计算，并写回相同地址三项事务在同一原子操作中完成，因此会修改 cache 的状态为 MODIFIED 
+     */
     if (mf->isatomic()) {
         assert(mf->get_access_type() == GLOBAL_ACC_R);
         cache_block_t *block = m_tag_array->get_block(cache_index);
+        /**
+         * 并判断其是否先前已被 MODIFIED，如果先前未被 MODIFIED，此次原子操作做出 MODIFIED，要增加 dirty 数目，
+         * 如果先前 block 已经被 MODIFIED，则先前dirty 数目已经增加过了，就不需要再增加了
+         */
         if (!block->is_modified_line()) {
             m_tag_array->inc_dirty();
         }
-        block->set_status(MODIFIED,
-                          mf->get_access_sector_mask()); // mark line as
+
+        // 设置 cache block 的状态为 MODIFIED，以避免其他线程在这个 cache block 上的读写操作
+        block->set_status(MODIFIED, mf->get_access_sector_mask()); // mark line as MODIFIED
+
+        // 记录该request对write mask的修改
         block->set_byte_mask(mf);
     }
     return HIT;
@@ -2091,14 +2146,20 @@ data_cache::rd_hit_base(new_addr_type addr, unsigned cache_index, mem_fetch *mf,
 
 /****** Read miss functions (Set by config file) ******/
 
-/// Baseline read miss: Send read request to lower level memory,
-// perform write-back as necessary
+// Baseline read miss: Send read request to lower level memory, perform write-back as necessary
+
+/**
+ * 
+ */
 enum cache_request_status data_cache::rd_miss_base(
     new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
     std::list<cache_event> &events, enum cache_request_status status) {
+    /**
+     * 读 miss 时，就需要将数据请求发送至下一级存储。这里或许需要真实地向下一级存储发
+     * 送读请求，也或许由于 mshr 的存在，可以将数据请求合并进去，这样就不需要真实地向 下一级存储发送读请求
+     */
     if (miss_queue_full(1)) {
-        // cannot handle request this cycle
-        // (might need to generate two requests)
+        // cannot handle request this cycle (might need to generate two requests)
         m_stats.inc_fail_stats(mf->get_access_type(), MISS_QUEUE_FULL,
                                mf->get_streamID());
         return RESERVATION_FAIL;
@@ -2108,9 +2169,12 @@ enum cache_request_status data_cache::rd_miss_base(
     bool do_miss = false;
     bool wb = false;
     evicted_block_info evicted;
+
+    /*修改mshr table 和 tag table的状态，尝试向下级内存发送请求*/
     send_read_request(addr, block_addr, cache_index, mf, time, do_miss, wb,
                       evicted, events, false, false);
 
+    /*do_miss记录cache miss的请求是否被处理*/
     if (do_miss) {
         // If evicted block is modified and not a write-through
         // (already modified lower level)

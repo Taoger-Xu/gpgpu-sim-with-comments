@@ -188,10 +188,16 @@ private:
     const memory_config *m_mem_config;
     unsigned icnt_flit_size;
 
+    /**
+     * 在性能模拟过程中把mf划分为几个sector，但当mf返回时，需要将这些sector合并为一个mf
+     * 这里为了简便，就给每个分割的mf保留一个原始mf的指针
+     */
     mem_fetch *original_mf; // this pointer is set up when a request is divided into
                      // sector requests at L2 cache (if the req size > L2 sector
                      // size), so the pointer refers to the original request
 
+    /*在fetch-on-write策略中，当写入一个byte时，L2会取回整个sector，把写的位置和sector合并，并把sector标记为modified*/
+    /*在write-validate中，当写入一个bytes时，不需要fetch，每一个sector有a bit-wise write-mask*/
     mem_fetch *original_wr_mf; // this pointer refers to the original write req,
                                // when fetch-on-write policy is used
 };

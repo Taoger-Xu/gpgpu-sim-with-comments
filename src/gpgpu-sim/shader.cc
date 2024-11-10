@@ -908,6 +908,7 @@ void shader_core_stats::visualizer_print(gzFile visualizer_file) {
                   check ptx_ir.h to verify this does not overlap               \
                   other memory spaces */
 
+/*根据wrap id和对应的pc，获取解码后的warp_inst_t对象 */
 const warp_inst_t *exec_shader_core_ctx::get_next_inst(unsigned warp_id,
                                                        address_type pc) {
     // read the inst from the functional model
@@ -933,15 +934,13 @@ exec_shader_core_ctx::get_active_mask(unsigned warp_id, const warp_inst_t *pI) {
  *    3. 清空m_inst_fetch_buffer流水线寄存器
  */
 void shader_core_ctx::decode() {
-    /*整个decode()函数必须在流水线寄存器有效的时候执行 */
+    /*整个decode()函数必须在流水线寄存器有效的时候执行，把decode后的指令放入i-buffer */
     if (m_inst_fetch_buffer.m_valid) {
-        // decode 1 or 2 instructions and place them into ibuffer
         /*从流水线寄存器m_inst_fetch_buffer取出指令的pc*/
         address_type pc = m_inst_fetch_buffer.m_pc;
-        /*从功能模拟器中拿到指令内容，具体的函数实现暂时不清楚*/
-        const warp_inst_t *pI1 =
-            get_next_inst(m_inst_fetch_buffer.m_warp_id, pc);
-        /*把decode()后的指令放入I-buffer entry*/
+        /*得到warp_inst_t*/
+        const warp_inst_t *pI1 = get_next_inst(m_inst_fetch_buffer.m_warp_id, pc);
+        /*把decode()后的指令放入wrap id对应的I-buffer entry*/
         m_warp[m_inst_fetch_buffer.m_warp_id]->ibuffer_fill(0, pI1);
         m_warp[m_inst_fetch_buffer.m_warp_id]->inc_inst_in_pipeline();
         if (pI1) {
@@ -2113,6 +2112,9 @@ void shader_core_ctx::unset_depbar(const warp_inst_t &inst) {
     }
 }
 
+/**
+ * 完成指令inst，修改统计信息
+ */
 void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst) {
 #if 0
       printf("[warp_inst_complete] uid=%u core=%u warp=%u pc=%#x @ time=%llu \n",
@@ -2815,12 +2817,13 @@ void pipelined_simd_unit::cycle() {
         for (unsigned stage = 0; (stage + 1) < m_pipeline_depth; stage++)
             move_warp(m_pipeline_reg[stage], m_pipeline_reg[stage + 1]);
     }
+
     /*m_dispatch_reg不空，则将其dispatch到功能流水线开始执行 */
     if (!m_dispatch_reg->empty()) {
         /*m_dispatch_reg->dispatch_delay()模拟initiation_interval延迟，即要求指令必须在m_dispatch_reg等待initiation_interval拍 */
         if (!m_dispatch_reg->dispatch_delay()) {
-            int start_stage =
-                m_dispatch_reg->latency - m_dispatch_reg->initiation_interval;
+            int start_stage = m_dispatch_reg->latency - m_dispatch_reg->initiation_interval;
+
             /**移入对应的dispatch position */
             if (m_pipeline_reg[start_stage]->empty()) {
                 move_warp(m_pipeline_reg[start_stage], m_dispatch_reg);
@@ -2838,6 +2841,7 @@ void pipelined_simd_unit::cycle() {
  */
 void pipelined_simd_unit::issue(register_set &source_reg) {
     // move_warp(m_dispatch_reg,source_reg);
+    /*gpgpu-sim 4.0新增的sub_core_model特性 */
     bool partition_issue =
         m_config->sub_core_model && this->is_issue_partitioned();
     warp_inst_t **ready_reg =
@@ -2884,8 +2888,7 @@ void ldst_unit::init(mem_fetch_interface *icnt,
                                 IN_L1C_MISS_QUEUE, OTHER_GPU_CACHE, m_gpu);
     m_L1D = NULL;
     m_mem_rc = NO_RC_FAIL;
-    m_num_writeback_clients =
-        5; // = shared memory, global/local (uncached), L1D, L1T, L1C
+    m_num_writeback_clients = 5; // = shared memory, global/local (uncached), L1D, L1T, L1C
     m_writeback_arb = 0;
     m_next_global = NULL;
     m_last_inst_gpu_sim_cycle = 0;
@@ -2933,12 +2936,18 @@ ldst_unit::ldst_unit(mem_fetch_interface *icnt,
          mem_config, stats, sid, tpc);
 }
 
+/**
+ * 把source_reg对应的流水线寄存器的指令移入m_dispatch_reg寄存器
+ * 同时根据该指令对寄存器的写修改m_pending_writes
+ */
 void ldst_unit::issue(register_set &reg_set) {
+    /*从寄存器集合 reg_set 中获取一个非空寄存器，将其 inst 指令移出，并返回这条指令*/
     warp_inst_t *inst = *(reg_set.get_ready());
 
-    // record how many pending register writes/memory accesses there are for
-    // this instruction
+    // record how many pending register writes/memory accesses there are for this instruction
     assert(inst->empty() == false);
+
+    /*如果该指令是 load 指令，并且该指令的空间类型不是shared space，即要写入寄存器*/
     if (inst->is_load() and inst->space.get_type() != shared_space) {
         unsigned warp_id = inst->warp_id();
         unsigned n_accesses = inst->accessq_count();
@@ -2949,8 +2958,7 @@ void ldst_unit::issue(register_set &reg_set) {
             }
         }
         if (inst->m_is_ldgsts) {
-            m_pending_ldgsts[warp_id][inst->pc][inst->get_addr(0)] +=
-                n_accesses;
+            m_pending_ldgsts[warp_id][inst->pc][inst->get_addr(0)] += n_accesses;
         }
     }
 
@@ -2961,33 +2969,44 @@ void ldst_unit::issue(register_set &reg_set) {
     pipelined_simd_unit::issue(reg_set);
 }
 
+/**
+ * 1. 首先检查m_next_wb确定执行完毕的指令，修改记分牌和ldst_unit::m_pending_writes变量
+ * 2. 通过检查shared memory、global/local等内存响应，从而设置新的m_next_wb
+ */
 void ldst_unit::writeback() {
     // process next instruction that is going to writeback
     if (!m_next_wb.empty()) {
+        /*通过m_operand_collector完成写回；操作数收集器的 Bank 写回，返回 true；Bank 冲突时返回 false*/
         if (m_operand_collector->writeback(m_next_wb)) {
             bool insn_completed = false;
+            /*减少在对应寄存器上待写入的指令数量 */
             for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++) {
                 if (m_next_wb.out[r] > 0) {
+                    /*不是shared space，说明可能需要修改register */
                     if (m_next_wb.space.get_type() != shared_space) {
                         assert(m_pending_writes[m_next_wb.warp_id()]
                                                [m_next_wb.out[r]] > 0);
+                        /*修改m_pending_writes */
                         unsigned still_pending =
                             --m_pending_writes[m_next_wb.warp_id()]
                                               [m_next_wb.out[r]];
+                        
+                        /*说明该寄存器对应的写入已经完成 */
                         if (!still_pending) {
-                            m_pending_writes[m_next_wb.warp_id()].erase(
-                                m_next_wb.out[r]);
+                            /*移除该寄存器上的写入 */
+                            m_pending_writes[m_next_wb.warp_id()].erase(m_next_wb.out[r]);
+                            /*从记分牌释放该寄存器 */
                             m_scoreboard->releaseRegister(m_next_wb.warp_id(),
                                                           m_next_wb.out[r]);
                             insn_completed = true;
                         }
                     } else { // shared
+                        // 指令写回的地址是共享内存空间，没有寄存器参与，这时候直接从计分板中释放该寄存器即可
                         m_scoreboard->releaseRegister(m_next_wb.warp_id(),
                                                       m_next_wb.out[r]);
                         insn_completed = true;
                     }
-                } else if (m_next_wb
-                               .m_is_ldgsts) { // for LDGSTS instructions where
+                } else if (m_next_wb.m_is_ldgsts) { // for LDGSTS instructions where
                                                // no output register is used
                     m_pending_ldgsts[m_next_wb.warp_id()][m_next_wb.pc]
                                     [m_next_wb.get_addr(0)]--;
@@ -3012,12 +3031,16 @@ void ldst_unit::writeback() {
         }
     }
 
+    /*通过检查shared memory、global/local等内存响应，从而设置新的m_next_wb*/
     unsigned serviced_client = -1;
-    for (unsigned c = 0; m_next_wb.empty() && (c < m_num_writeback_clients);
-         c++) {
+    for (unsigned c = 0; m_next_wb.empty() && (c < m_num_writeback_clients);c++) {
         unsigned next_client = (c + m_writeback_arb) % m_num_writeback_clients;
         switch (next_client) {
         case 0: // shared memory
+            /**
+             * 只有 shared memory 的指令才会放到 m_pipeline_reg 中模拟延迟，
+             * 其他类型的访存指令例如 L1T/L1C/L1D/global/local 都有专门模拟他们的专门部件
+             */
             if (!m_pipeline_reg[0]->empty()) {
                 m_next_wb = *m_pipeline_reg[0];
                 if (m_next_wb.isatomic()) {
@@ -3108,14 +3131,22 @@ inst->space.get_type() != shared_space) { unsigned warp_id = inst->warp_id();
    pipelined_simd_unit::issue(reg_set);
 }
 */
+
+/**
+ * 
+ */
 void ldst_unit::cycle() {
+    
+    /*把结果写回register file*/
     writeback();
 
+    /*所有流水线寄存器前移一拍，只用于shared memory相关指令的模拟 */
     for (unsigned stage = 0; (stage + 1) < m_pipeline_depth; stage++)
         if (m_pipeline_reg[stage]->empty() &&
             !m_pipeline_reg[stage + 1]->empty())
             move_warp(m_pipeline_reg[stage], m_pipeline_reg[stage + 1]);
 
+    /*处理来自Memory Subsystem的内存响应，handling memory (data) replies coming back from the L2 */
     if (!m_response_fifo.empty()) {
         mem_fetch *mf = m_response_fifo.front();
         if (mf->get_access_type() == TEXTURE_ACC_R) {
@@ -3140,8 +3171,7 @@ void ldst_unit::cycle() {
                 m_response_fifo.pop_front();
                 delete mf;
             } else {
-                assert(!mf->get_is_write()); // L1 cache is write evict,
-                                             // allocate line on load miss only
+                assert(!mf->get_is_write()); // L1 cache is write evict, allocate line on load miss only
 
                 bool bypassL1D = false;
                 if (CACHE_GLOBAL == mf->get_inst().cache_op ||
@@ -3174,7 +3204,8 @@ void ldst_unit::cycle() {
         }
     }
 
-    m_L1T->cycle();
+    /*cycling the L1 texture, constant, and data caches*/
+    m_L1T->cycle(); 
     m_L1C->cycle();
     if (m_L1D) {
         m_L1D->cycle();
@@ -3182,6 +3213,7 @@ void ldst_unit::cycle() {
             L1_latency_queue_cycle();
     }
 
+    /*处理位于m_dispatch_reg的指令发出的内存请求 */
     warp_inst_t &pipe_reg = *m_dispatch_reg;
     enum mem_stage_stall_type rc_fail = NO_RC_FAIL;
     mem_stage_access_type type;
@@ -3192,6 +3224,7 @@ void ldst_unit::cycle() {
     done &= memory_cycle(pipe_reg, rc_fail, type);
     m_mem_rc = rc_fail;
 
+    /**如果 done 为 0 说明前面发生了 stall */
     if (!done) { // log stall types and return
         assert(rc_fail != NO_RC_FAIL);
         m_stats->gpgpu_n_stall_shd_mem++;
@@ -3199,9 +3232,12 @@ void ldst_unit::cycle() {
         return;
     }
 
+    /*如果前面没有stall，并且m_dispatch_reg不空*/
     if (!pipe_reg.empty()) {
         unsigned warp_id = pipe_reg.warp_id();
+        /*load指令*/
         if (pipe_reg.is_load()) {
+            /*对于shared memory request，直接把m_dispatch_reg移入对应latency的m_dispatch_reg */
             if (pipe_reg.space.get_type() == shared_space) {
                 if (m_pipeline_reg[m_config->smem_latency - 1]->empty()) {
                     // new shared memory request
@@ -3215,6 +3251,8 @@ void ldst_unit::cycle() {
                 //        return;
                 //}
 
+                /*如果是global/local/param memory空间的load指令*/
+                /*pending_requests用来判断该指令要写入的寄存器是否有之前的指令的写操作未完成*/
                 bool pending_requests = false;
                 for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++) {
                     unsigned reg_id = pipe_reg.out[r];
@@ -3231,6 +3269,8 @@ void ldst_unit::cycle() {
                         }
                     }
                 }
+
+                /*该指令没有挂起的写入 */
                 if (!pending_requests) {
                     m_core->warp_inst_complete(*m_dispatch_reg);
                     m_scoreboard->releaseRegisters(m_dispatch_reg);
@@ -3249,7 +3289,10 @@ void ldst_unit::cycle() {
                 m_core->dec_inst_in_pipeline(warp_id);
                 m_dispatch_reg->clear();
             }
-        } else {
+        } 
+        
+        //不是load指令，直接执行指令
+        else {
             // stores exit pipeline here
             m_core->dec_inst_in_pipeline(warp_id);
             m_core->warp_inst_complete(*m_dispatch_reg);

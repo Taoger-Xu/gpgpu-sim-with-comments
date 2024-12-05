@@ -59,6 +59,10 @@ typedef void *yyscan_t;
 int g_debug_execution = 0;
 // Output debug information to file options
 
+/**
+ * 该函数用来解析PTX指令的操作码延迟相关的选项的。该函数接受一个option_parser_t类型的参数，用于解析命
+    令行参数，并将相应的值存储在一个全局的数据结构中，以便其他函数可以使用
+ */
 void cuda_sim::ptx_opcocde_latency_options(option_parser_t opp) {
     option_parser_register(
         opp, "-ptx_opcode_latency_int", OPT_CSTR, &opcode_latency_int,

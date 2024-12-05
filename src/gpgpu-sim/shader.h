@@ -1452,6 +1452,8 @@ public:
     void fill(mem_fetch *mf);
     void flush();
     void invalidate();
+
+    /*将完成的m_next_wb写回寄存器，并且根据下级内存响应设置新的m_next_wb*/
     void writeback();
 
     // accessors
@@ -1538,17 +1540,19 @@ protected:
     /*二维矩阵，用wrap id和reg id来索引在寄存器执行写操作的指令数量，在ldst::issue()时增加，在writeback时减少 */
     std::map<unsigned /*warp_id*/,std::map<unsigned /*regnum*/, unsigned /*count*/>> m_pending_writes;
 
-    /*接收 SIMT Core Cluster 的 m_response_fifo 发送的 mf 访存数据包(mem_fetch)。
-    SIMT Core Cluster 还会向 L1I Cache 发送 INST_ACC_R 类型的访存数据包*/
+    /*接收 SIMT Core Cluster 的 m_response_fifo 发送的 mf 访存数据包(mem_fetch)*/
     std::list<mem_fetch *> m_response_fifo;
 
     opndcoll_rfu_t *m_operand_collector;
+
     Scoreboard *m_scoreboard;
 
+    /*m_next_global是下一次访问全局存储的mf */
     mem_fetch *m_next_global;
 
     /*下一条要writeback的指令 */
     warp_inst_t m_next_wb;
+
     unsigned m_writeback_arb; // round-robin arbiter for writeback contention between L1T, L1C, shared
     unsigned m_num_writeback_clients;
 
@@ -2781,6 +2785,15 @@ public:
                                                  const warp_inst_t *pI);
 };
 
+/**
+ * 1. each SIMT Core Cluster has a single response FIFO which holds the packets ejected 
+ *    from the interconnection network
+ * 2. The packets are directed to either a SIMT Core's instruction cache (if it is a memory response servicing an instruction fetch miss)
+ *    or its memory pipeline (LDST unit)
+ * 3. For generating memory requests at the LDST unit, each SIMT Core has its own injection port into the interconnection network. 
+ *    The injection port buffer however is shared by all the SIMT Cores in a cluster.
+ * 
+ */
 class simt_core_cluster {
 public:
     simt_core_cluster(class gpgpu_sim *gpu, unsigned cluster_id,
@@ -2842,9 +2855,10 @@ protected:
     const memory_config *m_mem_config;
 
     unsigned m_cta_issue_next_core;
-    /*记录每一个cluster中为每一个simt core执行cycle()函数的顺序
-    在create_shader_core_ctx()函数中初始化 */
+    /*记录每一个cluster中为每一个simt core执行cycle()函数的顺序在create_shader_core_ctx()函数中初始化 */
     std::list<unsigned> m_core_sim_order;
+
+    /*来自memory system的packet，用来响应inst cache miss or ldst unit */
     std::list<mem_fetch *> m_response_fifo;
 };
 

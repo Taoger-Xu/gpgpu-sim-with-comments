@@ -676,7 +676,7 @@ protected:
     // debug
     bool gpu_deadlock;
 
-    //// configuration parameters ////
+    // configuration parameters //
     const gpgpu_sim_config &m_config;
 
     const struct cudaDeviceProp *m_cuda_properties;

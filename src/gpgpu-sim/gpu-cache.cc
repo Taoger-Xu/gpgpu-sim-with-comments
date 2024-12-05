@@ -312,6 +312,8 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
                  * When a sector read request is received to a modified sector, 
                  * it first checks if the sector write-mask is complete, i.e. 
                  * all the bytes have been written to and the line is fully readable
+                 * If so, it reads the sector, otherwise, similar to fetch-on-write, it generates a read request for this sector 
+                 * and merges it with the modified bytes
                 */
                 if ((!is_write && line->is_readable(mask)) || is_write) {
                     idx = index;
@@ -1375,14 +1377,14 @@ void baseline_cache::bandwidth_management::use_data_port(
     }
 }
 
-/// use the fill port
+// use the fill port
 void baseline_cache::bandwidth_management::use_fill_port(mem_fetch *mf) {
     // assume filling the entire line with the returned request
     unsigned fill_cycles = m_config.get_atom_sz() / m_config.m_data_port_width;
     m_fill_port_occupied_cycles += fill_cycles;
 }
 
-/// called every cache cycle to free up the ports
+// called every cache cycle to free up the ports
 void baseline_cache::bandwidth_management::replenish_port_bandwidth() {
     if (m_data_port_occupied_cycles > 0) {
         m_data_port_occupied_cycles -= 1;
@@ -1395,12 +1397,12 @@ void baseline_cache::bandwidth_management::replenish_port_bandwidth() {
     assert(m_fill_port_occupied_cycles >= 0);
 }
 
-/// query for data port availability
+// query for data port availability
 bool baseline_cache::bandwidth_management::data_port_free() const {
     return (m_data_port_occupied_cycles == 0);
 }
 
-/// query for fill port availability
+// query for fill port availability
 bool baseline_cache::bandwidth_management::fill_port_free() const {
     return (m_fill_port_occupied_cycles == 0);
 }
@@ -1489,7 +1491,7 @@ void baseline_cache::fill(mem_fetch *mf, unsigned time) {
     m_bandwidth_management.use_fill_port(mf);
 }
 
-/// Checks if mf is waiting to be filled by lower memory level
+// Checks if mf is waiting to be filled by lower memory level
 bool baseline_cache::waiting_for_fill(mem_fetch *mf) {
     extra_mf_fields_lookup::iterator e = m_extra_mf_fields.find(mf);
     return e != m_extra_mf_fields.end();
@@ -1557,7 +1559,7 @@ void baseline_cache::inc_aggregated_stats_pw(cache_request_status status,
     }
 }
 
-/// Read miss handler without writeback
+// Read miss handler without writeback
 void baseline_cache::send_read_request(new_addr_type addr,
                                        new_addr_type block_addr,
                                        unsigned cache_index, mem_fetch *mf,
@@ -1654,7 +1656,7 @@ void baseline_cache::send_read_request(new_addr_type addr,
         assert(0);
 }
 
-/// Sends write request to lower level memory (write or writeback)
+// Sends write request to lower level memory (write or writeback)
 void data_cache::send_write_request(mem_fetch *mf, cache_event request,
                                     unsigned time,
                                     std::list<cache_event> &events) {
@@ -1723,7 +1725,7 @@ cache_request_status data_cache::wr_hit_wb(new_addr_type addr,
     return HIT;
 }
 
-/// Write-through hit: Directly send request to lower level memory
+// Write-through hit: Directly send request to lower level memory
 cache_request_status data_cache::wr_hit_wt(new_addr_type addr,
                                            unsigned cache_index, mem_fetch *mf,
                                            unsigned time,

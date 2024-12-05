@@ -78,6 +78,7 @@ mem_fetch *shader_core_mem_fetch_allocator::alloc(
         m_core_id, m_cluster_id, m_memory_config, cycle, original_mf);
     return mf;
 }
+
 /////////////////////////////////////////////////////////////////////////////
 
 std::list<unsigned> shader_core_ctx::get_regs_written(const inst_t &fvt) const {
@@ -2184,14 +2185,19 @@ void shader_core_ctx::writeback() {
     }
 }
 
+/**
+ * 判断inst访问shared memory是否会stall，如果stall返回true
+ */
 bool ldst_unit::shared_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
                              mem_stage_access_type &fail_type) {
+    /*指令不是shared memory指令 */
     if (inst.space.get_type() != shared_space)
         return true;
-
+    /*指令对应的活跃线程数为0 */
     if (inst.active_count() == 0)
         return true;
 
+    /*建模指令的访问延迟，依然在访问该bank*/
     if (inst.has_dispatch_delay()) {
         m_stats->gpgpu_n_shmem_bank_access[m_sid]++;
     }
@@ -2937,7 +2943,7 @@ ldst_unit::ldst_unit(mem_fetch_interface *icnt,
 }
 
 /**
- * 把source_reg对应的流水线寄存器的指令移入m_dispatch_reg寄存器
+ * 把source_reg对应的pipeline register的指令移入m_dispatch_reg寄存器
  * 同时根据该指令对寄存器的写修改m_pending_writes
  */
 void ldst_unit::issue(register_set &reg_set) {
@@ -3006,8 +3012,7 @@ void ldst_unit::writeback() {
                                                       m_next_wb.out[r]);
                         insn_completed = true;
                     }
-                } else if (m_next_wb.m_is_ldgsts) { // for LDGSTS instructions where
-                                               // no output register is used
+                } else if (m_next_wb.m_is_ldgsts) { // for LDGSTS instructions where no output register is used
                     m_pending_ldgsts[m_next_wb.warp_id()][m_next_wb.pc]
                                     [m_next_wb.get_addr(0)]--;
                     if (m_pending_ldgsts[m_next_wb.warp_id()][m_next_wb.pc]
@@ -3133,11 +3138,12 @@ inst->space.get_type() != shared_space) { unsigned warp_id = inst->warp_id();
 */
 
 /**
- * 
+ * 1. 处理来自m_response_fifo的内存响应
+ * 2. 
  */
 void ldst_unit::cycle() {
     
-    /*把结果写回register file*/
+    /*把访存完成的的inst的结果写回register file，修改记分牌*/
     writeback();
 
     /*所有流水线寄存器前移一拍，只用于shared memory相关指令的模拟 */
@@ -3173,9 +3179,13 @@ void ldst_unit::cycle() {
             } else {
                 assert(!mf->get_is_write()); // L1 cache is write evict, allocate line on load miss only
 
+                // bypassL1D是指代数据访问是否绕过L1数据缓存
+                /**L1缓存由于竞争严重，命中率低，选择绕过L1可以直接把下级的响应直接转发给运算单元或者寄存器文件 */
                 bool bypassL1D = false;
                 if (CACHE_GLOBAL == mf->get_inst().cache_op ||
                     (m_L1D == NULL)) {
+                    /**CACHE_GLOBAL==.cg，Cache at global level，全局级缓存（L2及以下缓存，而不是L1）。
+                     * 使用ld.cg全局性地加载，绕过L1缓存，并仅缓存在L2缓存中 */
                     bypassL1D = true;
                 } else if (mf->get_access_type() == GLOBAL_ACC_R ||
                            mf->get_access_type() ==
@@ -3184,6 +3194,7 @@ void ldst_unit::cycle() {
                         bypassL1D = true;
                 }
                 if (bypassL1D) {
+                    /*m_next_global是下一次访问全局存储的mf，如果它空闲，则m_next_global = mf，空闲的话就无法继续放出该次访问*/
                     if (m_next_global == NULL) {
                         mf->set_status(
                             IN_SHADER_FETCHED,
@@ -4893,8 +4904,7 @@ simt_core_cluster::simt_core_cluster(class gpgpu_sim *gpu, unsigned cluster_id,
                                      shader_core_stats *stats,
                                      class memory_stats_t *mstats) {
     m_config = config;
-    m_cta_issue_next_core = m_config->n_simt_cores_per_cluster -
-                            1; // this causes first launch to use hw cta 0
+    m_cta_issue_next_core = m_config->n_simt_cores_per_cluster - 1; // this causes first launch to use hw cta 0
     m_cluster_id = cluster_id;
     m_gpu = gpu;
     m_stats = stats;

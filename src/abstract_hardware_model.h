@@ -441,12 +441,14 @@ public:
     int gpgpu_coalesce_arch;
 
     // shared memory bank conflict checking parameters
+    // Limit shared memory to do one broadcast per cycle (default on)
     bool shmem_limited_broadcast;
     static const address_type WORD_SIZE = 4;
     unsigned num_shmem_bank;
     unsigned shmem_bank_func(address_type addr) const {
         return ((addr / WORD_SIZE) % num_shmem_bank);
     }
+    /*Number of portions a warp is divided into for shared memory bank conflict check */
     unsigned mem_warp_parts;
     mutable unsigned gpgpu_shmem_size;
     char *gpgpu_shmem_option;
@@ -635,6 +637,8 @@ class gpgpu_t {
 public:
     gpgpu_t(const gpgpu_functional_sim_config &config, gpgpu_context *ctx);
     // backward pointer
+
+    /*全局唯一的gpgpu */
     class gpgpu_context *gpgpu_ctx;
     int checkpoint_option;
     int checkpoint_kernel;
@@ -844,18 +848,18 @@ typedef std::bitset<SECTOR_CHUNCK_SIZE> mem_access_sector_mask_t;
 /**
  * 下面复杂的宏展开主要是实现了如下功能：
  * enum mem_access_type {
-    GLOBAL_ACC_R,
-    LOCAL_ACC_R,
-    CONST_ACC_R,
-    TEXTURE_ACC_R,
-    GLOBAL_ACC_W,
-    LOCAL_ACC_W,
-    L1_WRBK_ACC,
-    L2_WRBK_ACC,
-    INST_ACC_R,
+    GLOBAL_ACC_R,  // 从 global memory 读
+    LOCAL_ACC_R,   // 从 local memory 读
+    CONST_ACC_R,   // 从常量缓存读
+    TEXTURE_ACC_R, // 从纹理缓存读
+    GLOBAL_ACC_W,  // 向 global memory 写
+    LOCAL_ACC_W,   // 向 local memory 写
+    L1_WRBK_ACC,   // L1缓存write back
+    L2_WRBK_ACC,   // 当 L2 cache 写不命中时，采取 lazy_fetch_on_read 策略，当找到一个 cache 
+                   // block 逐出时，如果这个 cache block 是被 MODIFIED，则需要将这个 cache block 写回到
+    INST_ACC_R,    // 从指令缓存读
     L1_WR_ALLOC_R,
     L2_WR_ALLOC_R,
-    NUM_MEM_ACCESS_TYPE
 };
  */
 #define MEM_ACCESS_TYPE_TUP_DEF                                                \
@@ -1149,8 +1153,10 @@ public:
 
     /*program counter address of instruction */
     address_type pc;
+
     /*size of instruction in bytes */
     unsigned isize;
+
     /*opcode (uarch visible)*/
     op_type op;
 
@@ -1206,6 +1212,7 @@ protected:
 
 enum divergence_support_t { POST_DOMINATOR = 1, NUM_SIMD_MODEL };
 
+/*MAX_ACCESSES_PER_INSN_PER_THREAD为单个线程中允许的最大访存次数。设置为8*/
 const unsigned MAX_ACCESSES_PER_INSN_PER_THREAD = 8;
 
 /**
@@ -1213,8 +1220,7 @@ const unsigned MAX_ACCESSES_PER_INSN_PER_THREAD = 8;
  *  1. 包含A dynamic “SIMD” instruction executed by a warp
     2. 用于issue()阶段后面的Pipeline Register
  * 继承自warp_inst_t 的每条ptx_instruction在 functional
- simulation中被填充，然后在时序模拟中
-    ptx_instruction会被down成warp_inst_t从而丢掉不需要的信息
+ simulation中被填充，然后在时序模拟中ptx_instruction会被down成warp_inst_t从而丢掉不需要的信息
     包含以下内容：
         - warp_id
         - active thread mask inside the warp,
@@ -1391,6 +1397,10 @@ public:
     const mem_access_t &accessq_back() { return m_accessq.back(); }
     void accessq_pop_back() { m_accessq.pop_back(); }
 
+    /**
+     * 一般的指令初始化时设置为 cycles = initiation_interval;，每次调用 dispatch_delay() 时，cycles 减 1，直到 cycles==0。
+     * 但是有一个特例，就是当指令是访存 shared memory 时，为了模拟 bank conflict，需要将initiation_interval 设置为 total_accesses，这样
+     */
     bool dispatch_delay() {
         if (cycles > 0)
             cycles--;
@@ -1408,10 +1418,12 @@ public:
 protected:
     unsigned m_uid;
     unsigned long long m_streamID;
+    /*指令为空*/
     bool m_empty;
     bool m_cache_hit;
     unsigned long long issue_cycle;
-    /**用于实现initiation interval delay，即在m_dispatch_reg中等待的时间 */
+
+    /**用于实现initiation interval delay，即在m_dispatch_reg中等待的时间，或者访问shared memory的延迟 */
     unsigned cycles;
     bool m_isatomic;
     bool should_do_atomic;
@@ -1419,11 +1431,12 @@ protected:
     unsigned m_warp_id;
     unsigned m_dynamic_warp_id;
     const core_config *m_config;
-    active_mask_t m_warp_active_mask; // dynamic active mask for timing model
-                                      // (after predication)
-    active_mask_t
-        m_warp_issued_mask; // active mask at issue (prior to predication test)
-                            // -- for instruction counting
+
+    /*dynamic active mask for timing model (after predication)*/
+    active_mask_t m_warp_active_mask; 
+    
+    /*active mask at issue (prior to predication test) -- for instruction counting*/
+    active_mask_t m_warp_issued_mask; 
 
     struct per_thread_info {
         per_thread_info() {
@@ -1431,19 +1444,18 @@ protected:
                 memreqaddr[i] = 0;
         }
         dram_callback_t callback;
-        new_addr_type
-            memreqaddr[MAX_ACCESSES_PER_INSN_PER_THREAD]; // effective address,
-                                                          // upto 8 different
-                                                          // requests (to
-                                                          // support 32B access
-                                                          // in 8 chunks of 4B
-                                                          // each)
+        /*每一个thread可以发出8个不同的request，support 32B access in 8 chunks of 4B each) */
+        /*但是一般用memreqaddr[0]记录128 byte的访存地址 */
+        new_addr_type memreqaddr[MAX_ACCESSES_PER_INSN_PER_THREAD]; 
     };
+
     bool m_per_scalar_thread_valid;
+    
+    /* information of threads inside that warp */
     std::vector<per_thread_info> m_per_scalar_thread;
     bool m_mem_accesses_created;
 
-    /*该指令对应的访问操作*/
+    /*该指令对应的访问操作，即list of memory accesses*/
     std::list<mem_access_t> m_accessq;
 
     /**issue这条指令的scheduler id */

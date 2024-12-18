@@ -800,7 +800,6 @@ void gpgpu_sim_config::reg_options(option_parser_t opp) {
                            "0");
 }
 
-/////////////////////////////////////////////////////////////////////////////
 
 /**
  * 先在x维加一，如果x维超过bound则在y维加一，y维超过bound则在z维加一
@@ -1882,15 +1881,24 @@ void shader_core_ctx::release_shader_resource_1block(unsigned hw_ctaid,
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////
-
 /**
  * Launches a cooperative thread array (CTA).
  *
  * @param kernel
  *    object that tells us which kernel to ask for a CTA from
  */
-
+/**
+ * kernel_info_t &kernel：该thread所执行的kernel
+ * ptx_thread_info **thread_info：其在core_t::ptx_thread_info **m_thread的指针，用于指向在function模拟中的每一个scalar thread
+ * sid：simt core对应的shader core id
+ * tid：位于start_thread和end_thread之间要在sm上模拟的hard thread index
+ * threads_left：运行到i时，cta内部还剩下的线程数量
+ * num_threads：
+ * core_t *core：所在的simt core指针
+ * hw_cta_id：位于0-max_cta之间的hardware cta id
+ * hw_warp_id：在cta_size内部按照wrap大小模除得到的warp id
+ * gpgpu_t *gpu：所在的time model的指针
+ */
 unsigned exec_shader_core_ctx::sim_init_thread(
     kernel_info_t &kernel, ptx_thread_info **thread_info, int sid, unsigned tid,
     unsigned threads_left, unsigned num_threads, core_t *core,
@@ -1903,7 +1911,7 @@ unsigned exec_shader_core_ctx::sim_init_thread(
  * 把kernel发射到simt core上执行
  */
 void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
-    /*不支持SM上的并发内核（默认为禁用），在V100配置中禁用*/
+    /*不支持SM上的并发kernel（默认为禁用），在V100配置中禁用*/
     if (!m_config->gpgpu_concurrent_kernel_sm)
         set_max_cta(kernel);
     else
@@ -1913,7 +1921,7 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
     /*该kernel对应的simt core的数量加一 */
     kernel.inc_running();
 
-    /*free_cta_hw_id指没有被占用的CTA ID，下面找一个空闲的CTA */
+    /*free_cta_hw_id指没有被占用的CTA ID，下面找kernel中一个空闲的CTA */
     unsigned free_cta_hw_id = (unsigned)-1;
 
     unsigned max_cta_per_core;
@@ -1947,6 +1955,7 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
         padded_cta_size =
             ((cta_size / m_config->warp_size) + 1) * (m_config->warp_size);
 
+    /*start_thread对应需要开始执行的线程索引，小于该索引的都已经被分配到SIMT core上执行，这里均为hard thread id */
     unsigned int start_thread, end_thread;
 
     if (!m_config->gpgpu_concurrent_kernel_sm) {
@@ -1976,14 +1985,23 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
     symbol_table *symtab = kernel_func_info->get_symtab();
     unsigned ctaid = kernel.get_next_cta_id_single();
     checkpoint *g_checkpoint = new checkpoint();
+
+    /**
+     * 循环调用sim_init_thread()完成对同一个CTA内部标量线程在function模型中状态的初始化
+     * sim_init_thread函数会返回能否初始化第i个线程
+     */
     for (unsigned i = start_thread; i < end_thread; i++) {
+        /*设置cta_id，范围为0-max_ctx_in_core*/
         m_threadState[i].m_cta_id = free_cta_hw_id;
+        /*计算该thread对应的wrap id*/
         unsigned warp_id = i / m_config->warp_size;
+        /*调用sim_init_thread()初始化 scalar threads */
         nthreads_in_block += sim_init_thread(
             kernel, &m_thread[i], m_sid, i, cta_size - (i - start_thread),
             m_config->n_thread_per_shader, this, free_cta_hw_id, warp_id,
             m_cluster->get_gpu());
         m_threadState[i].m_active = true;
+
         // load thread local memory and register file
         if (m_gpu->resume_option == 1 &&
             kernel.get_uid() == m_gpu->resume_kernel &&
@@ -2001,10 +2019,12 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
         //
         warps.set(warp_id);
     }
+
     assert(nthreads_in_block > 0 &&
            nthreads_in_block <=
                m_config->n_thread_per_shader); // should be at least one, but
                                                // less than max
+    /*m_cta_status[i]代表第i个CTA内的活跃线程数量*/
     m_cta_status[free_cta_hw_id] = nthreads_in_block;
 
     if (m_gpu->resume_option == 1 && kernel.get_uid() == m_gpu->resume_kernel &&
@@ -2022,6 +2042,8 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
     // initialize the SIMT stacks and fetch hardware
     init_warps(free_cta_hw_id, start_thread, end_thread, ctaid, cta_size,
                kernel);
+    
+    /*活跃的CTA数量增1*/
     m_n_active_cta++;
 
     shader_CTA_count_log(m_sid, 1);

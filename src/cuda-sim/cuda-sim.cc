@@ -1861,12 +1861,15 @@ int tensorcore_op(int inst_opcode) {
     else
         return 0;
 }
+
+/**
+ * lane_id是该wrap内线程的相对index，从0-31
+ */
 void ptx_thread_info::ptx_exec_inst(warp_inst_t &inst, unsigned lane_id) {
     bool skip = false;
     int op_classification = 0;
     addr_t pc = next_instr();
-    assert(pc ==
-           inst.pc); // make sure timing model and functional model are in sync
+    assert(pc == inst.pc); // make sure timing model and functional model are in sync
     const ptx_instruction *pI = m_func_info->get_instruction(pc);
 
     set_npc(pc + pI->inst_size());
@@ -1891,7 +1894,26 @@ void ptx_thread_info::ptx_exec_inst(warp_inst_t &inst, unsigned lane_id) {
                 enable_debug_trace();
             }
         }
-
+        /**
+         * asm("{\n\t"
+            ".reg .s32 b;\n\t"  // 1. 声明一个 32 位临时寄存器 b。
+            ".reg .pred p;\n\t" // 2. 声明一个谓词寄存器 p，用于布尔逻辑条件判断。
+            "add.cc.u32 %1, %1, %2;\n\t" // 3. 执行带进位的无符号加法：%1 = %1 + %2 (x[1] + x[2])。
+            "addc.s32 b, 0, 0;\n\t" // 4. 计算进位，加上 0 和 0，结果存储在寄存器 b 中。
+            "sub.cc.u32 %0, %0, %2;\n\t" // 5. 执行带借位的无符号减法：%0 = %0 - %2 (x[0] - x[2])。
+            "subc.cc.u32 %1, %1, 0;\n\t" // 6. 减去借位：%1 = %1 - 借位 (高位 x[1] 更新)。
+            "subc.s32 b, b, 0;\n\t"  // 7. 计算 b 减去借位：b = b - 借位 (更新临时寄存器 b)。
+            "setp.eq.s32 p, b, 1;\n\t" // 8. 设置谓词 p：如果 b == 1，则将 p 设置为 true。
+            // 9. 条件执行：如果谓词 p 为 true，则 %0 = %0 + 0xffffffff (相当于 %0 - 1)。
+            "@p add.cc.u32 %0, %0, 0xffffffff;\n\t"
+            // 10. 条件执行：如果谓词 p 为 true，则 %1 = %1 + 0 (高位 x[1] 更新)。
+            "@p addc.u32 %1, %1, 0;\n\t"
+            "}":
+            // 11. 寄存器绑定：x[0] 和 x[1] 是输入/输出寄存器，绑定到 %0 和 %1。
+            "+r"(x[0]), "+r"(x[1])
+            // 12. 只读输入寄存器：x[2] 绑定到 %2。
+            : "r"(x[2]));
+         */
         if (pI->has_pred()) {
             const operand_info &pred = pI->get_pred();
             ptx_reg_t pred_value =
@@ -1906,6 +1928,7 @@ void ptx_thread_info::ptx_exec_inst(warp_inst_t &inst, unsigned lane_id) {
         }
         int inst_opcode = pI->get_opcode();
 
+        // 在谓词测试之后，如果设置了[skip]标志，则停用线程通道，即在function对该线程不执行该instruction
         if (skip) {
             inst.set_not_active(lane_id);
         } else {
@@ -2141,12 +2164,31 @@ const warp_inst_t *gpgpu_context::ptx_fetch_inst(address_type pc) {
     return pc_to_instruction(pc);
 }
 
+/**
+ * When new thread blocks are launched in shader_core_ctx::issue_block2core, the timing simulator 
+ * initializes the per-thread functional state by calling the functional model method ptx_sim_init_thread().
+ * 
+ * kernel_info_t &kernel：该thread所执行的kernel
+ * ptx_thread_info **thread_info：其在core_t::ptx_thread_info **m_thread的指针，用于指向在function模拟中的每一个scalar thread，在该函数中进行修改
+ * sid：simt core对应的shader core id
+ * tid：位于start_thread和end_thread之间要在sm上模拟的hard thread index
+ * threads_left：运行到i时，cta内部还剩下的线程数量
+ * num_threads：是配置文件中的n_thread_per_shader
+ * core_t *core：所在的simt core指针
+ * hw_cta_id：位于0-max_cta之间的hardware cta id
+ * hw_warp_id：在cta_size内部按照wrap大小模除得到的warp id
+ * gpgpu_t *gpu：所在的time model的指针
+ * 
+ * 会在单个CTA内的所有线程进行循环调用ptx_sim_init_thread()完成线程初始化，初始化可通过ptx_exec_inst()执行指令
+ * 返回1代表成功初始化一个function simulate的thread state
+ */
 unsigned ptx_sim_init_thread(kernel_info_t &kernel,
                              ptx_thread_info **thread_info, int sid,
                              unsigned tid, unsigned threads_left,
                              unsigned num_threads, core_t *core,
                              unsigned hw_cta_id, unsigned hw_warp_id,
                              gpgpu_t *gpu, bool isInFunctionalSimulationMode) {
+    /*active_threads得到之前用来执行该kernel的线程的信息*/
     std::list<ptx_thread_info *> &active_threads = kernel.active_threads();
 
     static std::map<unsigned, memory_space *> shared_memory_lookup;
@@ -2156,6 +2198,7 @@ unsigned ptx_sim_init_thread(kernel_info_t &kernel,
     static std::map<unsigned, std::map<unsigned, memory_space *>>
         local_memory_lookup;
 
+    /*该thread还保留上一个执行过程的的信息，需要清空该信息*/
     if (*thread_info != NULL) {
         ptx_thread_info *thd = *thread_info;
         assert(thd->is_done());
@@ -2172,6 +2215,7 @@ unsigned ptx_sim_init_thread(kernel_info_t &kernel,
         *thread_info = NULL;
     }
 
+    /**该kernel之前已经有活跃的thread开始执行*/
     if (!active_threads.empty()) {
         assert(active_threads.size() <= threads_left);
         ptx_thread_info *thd = active_threads.front();
@@ -2182,6 +2226,7 @@ unsigned ptx_sim_init_thread(kernel_info_t &kernel,
         return 1;
     }
 
+    /*内核函数的所有CTA均已经执行完毕，返回0*/
     if (kernel.no_more_ctas_to_run()) {
         return 0; // finished!
     }
@@ -2205,6 +2250,7 @@ unsigned ptx_sim_init_thread(kernel_info_t &kernel,
     assert(max_cta_per_sm > 0);
 
     // unsigned sm_idx = (tid/cta_size)*gpgpu_param_num_shaders + sid;
+    // gpgpu_param_num_shaders为GPU的SIMT Core的个数，即SM的个数
     unsigned sm_idx =
         hw_cta_id * gpu->gpgpu_ctx->func_sim->gpgpu_param_num_shaders + sid;
 
@@ -2235,14 +2281,19 @@ unsigned ptx_sim_init_thread(kernel_info_t &kernel,
 
     std::map<unsigned, memory_space *> &local_mem_lookup =
         local_memory_lookup[sid];
+    
+    /*循环kernel的CTA中所有的thread，初始化其对应的ptx_thread_info*/
     while (kernel.more_threads_in_cta()) {
         dim3 ctaid3d = kernel.get_next_cta_id();
         unsigned new_tid = kernel.get_next_thread_id();
         dim3 tid3d = kernel.get_next_thread_id_3d();
+        //递增CTA内thread的坐标
         kernel.increment_thread_id();
         new_tid += tid;
         ptx_thread_info *thd = new ptx_thread_info(kernel);
         ptx_warp_info *warp_info = NULL;
+
+        /*避免重复创建ptx_warp_info*/
         if (ptx_warp_lookup.find(hw_warp_id) == ptx_warp_lookup.end()) {
             warp_info = new ptx_warp_info();
             ptx_warp_lookup[hw_warp_id] = warp_info;
@@ -2251,6 +2302,7 @@ unsigned ptx_sim_init_thread(kernel_info_t &kernel,
         }
         thd->m_warp_info = warp_info;
 
+        /*避免重复创建local_mem*/
         memory_space *local_mem = NULL;
         std::map<unsigned, memory_space *>::iterator l =
             local_mem_lookup.find(new_tid);
@@ -2287,13 +2339,16 @@ unsigned ptx_sim_init_thread(kernel_info_t &kernel,
                 (unsigned long long)thd);
             fflush(stdout);
         }
+        /*记录CTA内该thread所在的状态*/
         active_threads.push_back(thd);
     }
+
     if (g_debug_execution == -1) {
         printf("GPGPU-Sim PTX simulator:  <-- FINISHING THREAD ALLOCATION\n");
         fflush(stdout);
     }
 
+    /*kernel已经成功弹出一个CTA去function模拟*/
     kernel.increment_cta_id();
 
     assert(active_threads.size() <= threads_left);
@@ -2615,6 +2670,10 @@ void cuda_sim::gpgpu_cuda_ptx_sim_main_func(kernel_info_t &kernel,
 
     // we excute the kernel one CTA (Block) at the time, as synchronization
     // functions work block wise
+    /**
+     * no_more_ctas_to_run()在abstract_hardware_model.h中定义，其函数功能为：
+     * 判断kernel内核函数是否还有多余的CTA需要执行
+     */
     while (!kernel.no_more_ctas_to_run()) {
         unsigned temp = kernel.get_next_cta_id_single();
 
@@ -2693,19 +2752,44 @@ void cuda_sim::gpgpu_cuda_ptx_sim_main_func(kernel_info_t &kernel,
     fflush(stdout);
 }
 
+/**
+ * 
+ */
 void functionalCoreSim::initializeCTA(unsigned ctaid_cp) {
     int ctaLiveThreads = 0;
     symbol_table *symtab = m_kernel->entry()->get_symtab();
 
+    /*初始化所有warp的状态*/
     for (int i = 0; i < m_warp_count; i++) {
         m_warpAtBarrier[i] = false;
         m_liveThreadCount[i] = 0;
     }
+
+    /*初始化所有thread状态*/
     for (int i = 0; i < m_warp_count * m_warp_size; i++)
         m_thread[i] = NULL;
 
     // get threads for a cta
+    /**
+     * 重新设置该cta的内部的所有thread状态，即通过ptx_sim_init_thread去修改m_thread[i]
+     */
     for (unsigned i = 0; i < m_kernel->threads_per_cta(); i++) {
+        /**
+         * 函数定义：ptx_sim_init_thread(kernel_info_t &kernel,
+                                ptx_thread_info **thread_info, int sid,
+                                unsigned tid, unsigned threads_left,
+                                unsigned num_threads, core_t *core,
+                                unsigned hw_cta_id, unsigned hw_warp_id,
+                                gpgpu_t *gpu, bool isInFunctionalSimulationMode)
+        参数：
+        sid=0：SM的index，由于这里执行功能模拟，因此SM的index不重要，可以完全将所有需要执行的线程全部放到
+                第0号SM上。
+        tid=i：线程的index，在这个循环里将所有需要执行的线程全部放到第0号SM上，则线程的index即为循环变量i。
+        threads_left=m_kernel->threads_per_cta()-i：在当前线程之后剩余线程的数量。
+        num_threads=m_kernel->threads_per_cta()。
+        hw_cta_id=0：由于这里执行功能模拟，因此CTA的index不重要，硬件CTA的index可以始终为0。
+        hw_warp_id=i/m_warp_size：由于全都在一个CTA内，硬件的warp的index即为i/m_warp_size。
+         */
         ptx_sim_init_thread(*m_kernel, &m_thread[i], 0, i,
                             m_kernel->threads_per_cta() - i,
                             m_kernel->threads_per_cta(), this, 0,
@@ -2718,16 +2802,19 @@ void functionalCoreSim::initializeCTA(unsigned ctaid_cp) {
         ctaLiveThreads++;
     }
 
+    /*创建CTA中所有wrap需要的状态*/
     for (int k = 0; k < m_warp_count; k++)
         createWarp(k);
 }
 
+/**
+ * 创建warp在功能模拟需要的初始态，设置simt堆栈
+ */
 void functionalCoreSim::createWarp(unsigned warpId) {
     simt_mask_t initialMask;
     unsigned liveThreadsCount = 0;
     initialMask.set();
-    for (int i = warpId * m_warp_size; i < warpId * m_warp_size + m_warp_size;
-         i++) {
+    for (int i = warpId * m_warp_size; i < warpId * m_warp_size + m_warp_size;i++) {
         if (m_thread[i] == NULL)
             initialMask.reset(i - warpId * m_warp_size);
         else
@@ -2753,8 +2840,18 @@ void functionalCoreSim::createWarp(unsigned warpId) {
     m_liveThreadCount[warpId] = liveThreadsCount;
 }
 
+/*
+执行一个CTA。
+functionalCoreSim::execute函数在gpgpu_cuda_ptx_sim_main_func主函数中的调用为：
+    cta.execute(cp_count, temp); temp为下一个要发出的CTA的ID。cp_count=0。
+即ctaid_cp为下一个要发射的CTA的ID。其ID算法如下：
+    ID = m_next_cta.x + m_grid_dim.x * m_next_cta.y +
+         m_grid_dim.x * m_grid_dim.y * m_next_cta.z;
+*/
 void functionalCoreSim::execute(int inst_count, unsigned ctaid_cp) {
+    // 在GPGPU-Sim的配置文件中，-checkpoint_insn_Y一般不做配置，默认为0
     m_gpu->gpgpu_ctx->func_sim->cp_count = m_gpu->checkpoint_insn_Y;
+    // 在GPGPU-Sim的配置文件中，-checkpoint_CTA_t一般不做配置，默认为0
     m_gpu->gpgpu_ctx->func_sim->cp_cta_resume = m_gpu->checkpoint_CTA_t;
     initializeCTA(ctaid_cp);
 

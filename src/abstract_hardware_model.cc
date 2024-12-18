@@ -50,6 +50,9 @@ void mem_access_t::init(gpgpu_context *ctx) {
     m_req_size = 0;
 }
 
+/**
+ * 
+ */
 void warp_inst_t::issue(const active_mask_t &mask, unsigned warp_id,
                         unsigned long long cycle, int dynamic_warp_id,
                         int sch_id, unsigned long long streamID) {
@@ -288,13 +291,11 @@ void warp_inst_t::broadcast_barrier_reduction(
 }
 
 /*
-生成 warp 指令的内存访问的必要信息。
-在性能模型 shader_core_ctx::issue_warp 函数执行时，即指令确定能发射时，调用指令的功能执行函
-数对指令进行功能模拟。功能模拟的过程中，如果指令是load或store指令，则生成内存访
-问的必要的信息，例如：设置 access_type，计算一个 warp 指令对 shared memory 访存的执行
-周期等。
+生成 warp 指令的内存访问的必要信息。在性能模型 shader_core_ctx::issue_warp 函数执行时，即指令确定能发射时，
+调用指令的功能执行函数对指令进行功能模拟，即调用函数func_exec_inst()
+功能模拟的过程中，如果指令是load或store指令，则生成内存访问的必要的信息，
+例如：设置 access_type，计算一个 warp 指令对 shared memory 访存的执行周期等。
 */
-
 void warp_inst_t::generate_mem_accesses() {
     if (empty() || op == MEMORY_BARRIER_OP || m_mem_accesses_created)
         return;
@@ -303,10 +304,11 @@ void warp_inst_t::generate_mem_accesses() {
           (op == TENSOR_CORE_STORE_OP)))
         return;
     
-    /*predicated off*/
+    /*predicated off，即thread mask为空，也不会执行该访存指令*/
     if (m_warp_active_mask.count() == 0)
         return; 
 
+    /*starting_queue_size 用于记录在生成访存操作的必要信息之前，m_accessq 在该起始状态下的大小。*/
     const size_t starting_queue_size = m_accessq.size();
 
     assert(is_load() || is_store());
@@ -345,6 +347,7 @@ void warp_inst_t::generate_mem_accesses() {
     new_addr_type cache_block_size = 0; 
 
     switch (space.get_type()) {
+    /*shared_space和sstarr_space共用一个处理逻辑*/
     case shared_space:
     case sstarr_space: {
         /*wrap被分成subwarp_size个组，用来进行进行shared memory bank conflict check*/
@@ -362,7 +365,7 @@ void warp_inst_t::generate_mem_accesses() {
                 /*如果该线程非活跃，说明该线程没有访存请求，则跳出线程循环，转到下个线程*/
                 if (!active(thread))
                     continue;
-                /*memreqaddr[0]记录该thread的访存地址*/
+                /*memreqaddr[0]记录该thread的访存地址，一般用memreqaddr[0]记录连续访问128 byte的访存地址*/
                 new_addr_type addr = m_per_scalar_thread[thread].memreqaddr[0];
                 // FIXME: deferred allocation of shared memory should not
                 // accumulate across kernel launches assert( addr <
@@ -374,7 +377,13 @@ void warp_inst_t::generate_mem_accesses() {
                 new_addr_type word = line_size_based_tag_func(addr, m_config->WORD_SIZE);
                 bank_accs[bank][word]++;
             }
-
+            
+            /**
+             * Limit shared memory to do one broadcast per cycle (default on)
+             * 广播是指：有可能存在多个线程访问同一个 bank 的同一个 word 的情况，这时候为了避免需要分多拍对该 bank 访问，共享存储可以进行广播
+             * 这里的限制是每个周期只执行一次广播，即每次只能广播一个 bank 的 一个 word
+             * 满足广播的条件是：某 bank 的某个 word 被访问的次数大于 1，就说明至少两个线程访问了这个 bank 的同一个 word
+             */
             if (m_config->shmem_limited_broadcast) {
                 // step 2: look for and select a broadcast bank/word if one occurs
                 /*记录广播是否发生以及发生的bank，addr*/
@@ -409,6 +418,7 @@ void warp_inst_t::generate_mem_accesses() {
                 // 这里已经找到了需要被广播的 bank 号和广播的地址，需要计算max_bank_accesses，即shared memory访存延迟
                 unsigned max_bank_accesses = 0;
                 for (b = bank_accs.begin(); b != bank_accs.end(); b++) {
+                    /*bank_accesses 记录该bank上所有word的访问次数*/
                     unsigned bank_accesses = 0;
                     std::map<new_addr_type, unsigned> &access_set = b->second;
                     std::map<new_addr_type, unsigned>::iterator w;
@@ -417,6 +427,10 @@ void warp_inst_t::generate_mem_accesses() {
                     if (broadcast_detected && broadcast_bank == b->first) {
                         for (w = access_set.begin(); w != access_set.end();++w) {
                             if (w->first == broadcast_word) {
+                                /**
+                                 * 前面的计算是按照没有广播计算的，这里需要考虑广播进去，广播将 n 次对当前bank 的访存直接减小到 1，
+                                 * 对于该 bank 的总访存次数来说，就是减去 n - 1
+                                 */
                                 unsigned n = w->second;
                                 assert(n > 1); // or this wasn't a broadcast
                                 assert(bank_accesses >= (n - 1));
@@ -425,6 +439,11 @@ void warp_inst_t::generate_mem_accesses() {
                             }
                         }
                     }
+                    
+                    /**
+                     * 因为最大值就是当前这个 shared memory 访存指令需要执行的周期数，
+                     * 后面的代码会将这个周期数作为指令的 initial interval，用以模拟对 shared memory 访问的流水线执行延迟
+                     */
                     if (bank_accesses > max_bank_accesses)
                         max_bank_accesses = bank_accesses;
                 }
@@ -448,8 +467,20 @@ void warp_inst_t::generate_mem_accesses() {
             }
         }
         assert(total_accesses > 0 && total_accesses <= m_config->warp_size);
-        cycles = total_accesses; // shared memory conflicts modeled as larger
-                                 // initiation interval
+        //shared memory conflicts modeled as larger initiation interval
+        /**
+         * 首先在每个循环中max_bank_accesses计算每个subwarp在每个bank[0,1,...]产生的最大访问数
+         * 然后total_accesses则是将所有的 subwarp 累加起来的对第 0 号、第 1 号、... bank 访存次数的最大值
+         * 
+         * 对于一般的指令，其 initial interval 是由其指令操作码定义的。但是对 shared memory
+         * 访存指令来说，其 initial interval 是由对某个 bank 的访存总数（每次访存一个周期）定义的
+         * 
+         * 访存时间消耗时钟周期数是指 shared memory 对于多 bank 访存必须分 bank 访问的时间消耗，
+         * 而不是一条指令访问 shared memory 的总时间消耗。后者还需要加上 shared memory 的访存延迟，
+         * 这个延迟是由 gpgpu_l1_latency 配置参数决定的，这个固有延迟在执行流水线模型的 m_pipeline_reg 中模拟
+         */
+        cycles = total_accesses; 
+
         m_config->gpgpu_ctx->stats->ptx_file_line_stats_add_smem_bank_conflict(
             pc, total_accesses);
         break;
@@ -510,8 +541,10 @@ void warp_inst_t::generate_mem_accesses() {
     m_mem_accesses_created = true;
 }
 
-void warp_inst_t::memory_coalescing_arch(bool is_write,
-                                         mem_access_type access_type) {
+/**
+ * 
+ */
+void warp_inst_t::memory_coalescing_arch(bool is_write,mem_access_type access_type) {
     // see the CUDA manual where it discusses coalescing rules before reading
     // this
     unsigned segment_size = 0;
@@ -999,8 +1032,12 @@ simt_stack::simt_stack(unsigned wid, unsigned warpSize, class gpgpu_sim *gpu) {
     reset();
 }
 
+/*清空simt堆栈 */
 void simt_stack::reset() { m_stack.clear(); }
 
+/**
+ * 
+ */
 void simt_stack::launch(address_type start_pc, const simt_mask_t &active_mask) {
     reset();
     simt_stack_entry new_stack_entry;
@@ -1261,8 +1298,12 @@ void simt_stack::update(simt_mask_t &thread_done, addr_vector_t &next_pc,
     }
 }
 
+/**
+ * 实际对对该指令进行function simulate，通过func_exec_inst()调用该函数
+ */
 void core_t::execute_warp_inst_t(warp_inst_t &inst, unsigned warpId) {
     for (unsigned t = 0; t < m_warp_size; t++) {
+        /*如果wrap_id未传入，直接计算出来 */
         if (inst.active(t)) {
             if (warpId == (unsigned(-1)))
                 warpId = inst.warp_id();

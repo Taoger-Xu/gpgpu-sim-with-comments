@@ -293,17 +293,20 @@ private:
 
 
 /**
- *  a single scalar thread的状态信息，包括：
+ *  用于在function simulate中建模a single scalar thread的状态信息，包括：
  *    - Register value storage
       - Local memory storage
       - Program counter (PC)
       - Call stack
       - Thread IDs (the software ID within a grid launch, and the hardware ID 
           indicating which hardware thread slot it occupies in timing model)
+     SIMT core class shader_core_ctx通过成员变量m_thread维护在simt core中活跃的thread对应的functional state
  */
 class ptx_thread_info {
 public:
     ~ptx_thread_info();
+
+    /*用初始化scalar thread*/
     ptx_thread_info(kernel_info_t &kernel);
 
     void init(gpgpu_t *gpu, core_t *core, unsigned sid, unsigned cta_id,
@@ -492,12 +495,16 @@ private:
     core_t *m_core;
     gpgpu_t *m_gpu;
     bool m_valid;
+    
+    /*software ID within a grid launch*/
     dim3 m_ntid;
     dim3 m_tid;
     dim3 m_nctaid;
     dim3 m_ctaid;
     unsigned m_gridid;
     bool m_thread_done;
+
+    /*hardware ID indicating which hardware thread slot it occupies in timing model*/
     unsigned m_hw_sid;
     unsigned m_hw_tid;
     unsigned m_hw_wid;

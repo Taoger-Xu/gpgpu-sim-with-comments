@@ -37,6 +37,10 @@
 
 #include "../abstract_hardware_model.h"
 
+/**
+ * 每一个wrap对应一个scoreboard，实现一个wrap内的顺序发射，乱序执行
+ * 在issue()的时候观察该instruction要写入的寄存器从而修改scoreboard
+ */
 class Scoreboard {
 public:
     Scoreboard(unsigned sid, unsigned n_warps, class gpgpu_t *gpu);
@@ -54,12 +58,19 @@ private:
     void reserveRegister(unsigned wid, unsigned regnum);
     int get_sid() const { return m_sid; }
 
+    /*simt core id */
     unsigned m_sid;
 
-    // keeps track of pending writes to registers
-    // indexed by warp id, reg_id => pending write count
+    /**
+     * reg_table reserves all the destination registers in the issued instructions that are not written back
+     * keeps track of pending writes to registers
+     * tracks all the destination registers
+     * indexed by warp id, reg_id => pending write count
+     */
     std::vector<std::set<unsigned>> reg_table;
+
     // Register that depend on a long operation (global, local or tex memory)
+    /*longopregs reserves all the destination registers in the issued memory access instructions that are not written back.*/
     std::vector<std::set<unsigned>> longopregs;
 
     class gpgpu_t *m_gpu;

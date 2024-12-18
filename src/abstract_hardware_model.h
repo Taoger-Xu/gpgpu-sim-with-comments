@@ -232,6 +232,7 @@ extern std::map<void *, size_t> pinned_memory_size;
  *  - the function_info object associated with the kernel entry point
  *  - launch status
  *  - param memory： memory allocated for the kernel arguments in param memory
+ *  - active threads inside that kernel (ptx_thread_info).
  */
 class kernel_info_t {
 public:
@@ -287,6 +288,8 @@ public:
         m_next_tid.y = 0;
         m_next_tid.z = 0;
     }
+    
+    /*得到kernel要执行的下一个CTA的坐标 */
     dim3 get_next_cta_id() const { return m_next_cta; }
 
     /*获取下一个要发射的CTA的索引。CTA的全局索引与CUDA编程模型中的线程块索引类似，其ID算法如下*/
@@ -309,14 +312,23 @@ public:
                 m_next_cta.z >= m_grid_dim.z);
     }
 
+    /**
+     * CTA内线程的坐标按照x，y，z的次序移动
+    */
     void increment_thread_id() {
         increment_x_then_y_then_z(m_next_tid, m_block_dim);
     }
+    
+    /*kernel要执行的下一个thread在CTA内的坐标 */
     dim3 get_next_thread_id_3d() const { return m_next_tid; }
+
+    /*kernel要执行的下一个thread在CTA内的索引*/
     unsigned get_next_thread_id() const {
         return m_next_tid.x + m_block_dim.x * m_next_tid.y +
                m_block_dim.x * m_block_dim.y * m_next_tid.z;
     }
+
+    /*还有剩余的CTA等待function模拟 */
     bool more_threads_in_cta() const {
         return m_next_tid.z < m_block_dim.z && m_next_tid.y < m_block_dim.y &&
                m_next_tid.x < m_block_dim.x;
@@ -377,7 +389,9 @@ private:
     /*正在执行该kernel的simt core的数量，构造函数中初始化为0，通过*/
     unsigned m_num_cores_running;
 
+    /*该kernel被function  sim中对应的活跃thread信息 */
     std::list<class ptx_thread_info *> m_active_threads;
+
     class memory_space *m_param_mem;
 
 public:
@@ -477,10 +491,16 @@ typedef std::bitset<MAX_WARP_SIZE> active_mask_t;
 typedef std::bitset<MAX_WARP_SIZE_SIMT_STACK> simt_mask_t;
 typedef std::vector<address_type> addr_vector_t;
 
+/**
+ * 每一个warp都拥有一个simt堆栈，gpgpu-sim中只有在issue阶段会和simt堆栈产生交互，主要是：
+ * 1. 在scheduler_unit::cycle()中调用 get_active_mask()
+ * 2. 在shader_core_ctx::issue_warp()通过core_t::updateSIMTStack()更新simt堆栈
+ */
 class simt_stack {
 public:
     simt_stack(unsigned wid, unsigned warpSize, class gpgpu_sim *gpu);
 
+    /*清空 m_stack里的所有entry*/
     void reset();
     void launch(address_type start_pc, const simt_mask_t &active_mask);
     void update(simt_mask_t &thread_done, addr_vector_t &next_pc,
@@ -504,10 +524,14 @@ protected:
     };
 
     struct simt_stack_entry {
+        /*下一条需要被执行指令的PC（Next PC，NPC），为该分支内需要执行的指令PC*/
         address_type m_pc;
         unsigned int m_calldepth;
+        /*代表该指令的活跃掩码*/
         simt_mask_t m_active_mask;
+        /*分支重聚点的PC（Reconvergence PC，RPC），是直接后必经结点的PC（IPDOM*/
         address_type m_recvg_pc;
+        /*发生分支的时刻，时钟周期*/
         unsigned long long m_branch_div_cycle;
         stack_entry_type m_type;
         simt_stack_entry()
@@ -882,6 +906,41 @@ MEM_ACCESS_TYPE_TUP_DEF
 
 const char *mem_access_type_str(enum mem_access_type access_type);
 
+/*
+缓存运算符的类型。
+PTX ISA 2.0 版在加载和存储指令上引入了可选的缓存运算符。缓存运算符需要 sm_20 或更高的
+目标体系结构。加载或存储指令上的缓存运算符仅被视为性能提示。对 ld 或 st 指令使用缓存运
+算符不会改变程序的内存一致性行为。对于 sm_20 及更高版本，缓存运算符具有以下定义和行为：
+1. 内存 Load 指令的缓存运算符：
+ .ca: Cache at all levels，所有级别的缓存，可能会再次访问。
+      默认的 Load 指令缓存操作是 ld.ca，它使用正常的逐出策略在所有级别（L1 和 L2）中
+      分配缓存线。全局数据在 L2 级是一致的，但多个 L1 缓存对于全局数据来说是不一致的。
+      如果一个线程通过一个 L1 缓存存储到全局内存，而第二个线程通过第二个 L1 缓存加载该
+      地址，并使用 ld.ca，则第二个可能会得到过时的 L1 缓存数据，而不是第一个线程存储的
+      数据。驱动程序必须使并行线程的从属网格之间的全局 L1 缓存线无效。然后，第一个网格
+      程序的存储由第二个网格程序正确获取，该程序发出 L1 中缓存的默认 ld.ca 加载。
+ .cg  Cache at global level，全局级缓存（L2 及以下缓存，而不是 L1）。
+      使用 ld.cg 全局性地加载，绕过 L1 缓存，并仅缓存在 L2 缓存中。
+ .cs  Cache streaming，缓存流，可能会被访问一次。
+      ld.cs 加载缓存的流操作在 L1 和 L2 分配全局行，采用驱逐优先的策略在 L1 和 L2 分
+      配全局行，以限制临时流数据对缓存污染，这些数据可能被访问一次或两次。当 ld.cs 被
+      应用到一个本地窗口地址时，它执行 ld.lu 操作。
+ .lu  Last use。
+      编译器/程序员在恢复溢出的寄存器和弹出函数堆栈框架时可以使用 ld.lu，以避免不必要
+      的写回不会再使用的行。ld.lu 指令在全局地址上执行一个加载缓存的流操作（ld.cs）。
+ .cv  不要再次缓存和获取（考虑缓存的系统内存线已过时，再次获取）。应用于全局系统内存地
+      址的 ld.cv 加载操作使匹配的 L2 行无效（丢弃），并在每次新加载时重新获取该行。
+2. 内存 Store 指令的缓存运算符：
+ .wb  Cache write-back all coherent levels，缓存写回所有级别一致。
+      默认的存储指令缓存操作是 st.wb，它使用正常的逐出策略写回一致缓存级别的缓存行。如
+      果一个线程绕过其 L1 缓存存储到全局内存，而另一个 SM 中的第二个线程稍后通过具有 
+      ld.ca 的不同 L1 缓存从该地址加载，则第二个可能会命中过时的 L1 缓存数据，而不是从
+      第一个线程存储的 L2 或内存中获取数据。驱动程序必须使线程阵列的从属网格之间的全局 
+      L1 缓存线无效。然后，第一个网格程序的存储在 L1 中正确丢失，并由发出默认 ld.ca 加
+      载的第二个网格程序获取。
+ .wt  Cache write-through (to system memory).
+      st.wt 存储写入操作应用于通过二级缓存写入的全局系统内存地址。
+*/
 enum cache_operator_type {
     CACHE_UNDEFINED,
 
@@ -1115,13 +1174,18 @@ public:
         isize = 0;
     }
     bool valid() const { return m_decoded; }
+
     virtual void print_insn(FILE *fp) const {
         fprintf(fp, " [inst @ pc=0x%04llx] ", pc);
     }
+
+    /*指令的操作码是 LOAD 或 TENSOR_CORE_LOAD 则为load指令*/
     bool is_load() const {
         return (op == LOAD_OP || op == TENSOR_CORE_LOAD_OP ||
                 memory_op == memory_load);
     }
+
+    /*指令的操作码是 STORE 或 TENSOR_CORE_STORE 则为store指令*/
     bool is_store() const {
         return (op == STORE_OP || op == TENSOR_CORE_STORE_OP ||
                 memory_op == memory_store);
@@ -1184,8 +1248,11 @@ public:
     /*-1 => not a branch, -2 => use function return address*/
     address_type reconvergence_pc; 
 
+    /*目标寄存器ID*/
     unsigned out[8];
     unsigned outcount;
+
+    /*源寄存器ID*/
     unsigned in[24];
     unsigned incount;
     unsigned char is_vectorin;
@@ -1198,10 +1265,14 @@ public:
         int src[MAX_REG_OPERANDS];
     } arch_reg;
     // int arch_reg[MAX_REG_OPERANDS]; // register number for bank conflict evaluation
+
+    /*在在simd单元执行的latency相关*/
     unsigned latency; // operation latency
     unsigned initiation_interval;
 
-    unsigned data_size; // what is the size of the word being operated on?
+    /*what is the size of the word being operated on*/
+    unsigned data_size; 
+    /*对于ld/st指令的访存特性*/
     memory_space_t space;
     cache_operator_type cache_op;
 
@@ -1272,6 +1343,13 @@ public:
     void do_atomic(const active_mask_t &access_mask, bool forceDo = false);
     void clear() { m_empty = true; }
 
+    /**
+     * 设置指令动态发射过程中的一些信息:
+     * mask：该指令对应的线程活跃掩码
+     * warp_id：warp的id
+     * cycle：发射的周期
+     *  
+     */
     void issue(const active_mask_t &mask, unsigned warp_id,
                unsigned long long cycle, int dynamic_warp_id, int sch_id,
                unsigned long long streamID);
@@ -1393,13 +1471,17 @@ public:
     unsigned warp_size() const { return m_config->warp_size; }
 
     bool accessq_empty() const { return m_accessq.empty(); }
+
     unsigned accessq_count() const { return m_accessq.size(); }
+
     const mem_access_t &accessq_back() { return m_accessq.back(); }
+    
     void accessq_pop_back() { m_accessq.pop_back(); }
 
     /**
      * 一般的指令初始化时设置为 cycles = initiation_interval;，每次调用 dispatch_delay() 时，cycles 减 1，直到 cycles==0。
-     * 但是有一个特例，就是当指令是访存 shared memory 时，为了模拟 bank conflict，需要将initiation_interval 设置为 total_accesses，这样
+     * 但是有一个特例，就是当指令是访存 shared memory 时，为了模拟 bank conflict，需要将initiation_interval 设置为 total_accesses
+     * 该函数模拟每周期访问一个bank
      */
     bool dispatch_delay() {
         if (cycles > 0)
@@ -1423,7 +1505,7 @@ protected:
     bool m_cache_hit;
     unsigned long long issue_cycle;
 
-    /**用于实现initiation interval delay，即在m_dispatch_reg中等待的时间，或者访问shared memory的延迟 */
+    /**用于实现initiation interval delay，即在m_dispatch_reg中等待的时间，或者访问shared memory的因为bank冲突而造成延迟 */
     unsigned cycles;
     bool m_isatomic;
     bool should_do_atomic;
@@ -1453,6 +1535,8 @@ protected:
     
     /* information of threads inside that warp */
     std::vector<per_thread_info> m_per_scalar_thread;
+
+    /*已经创建过 mem_access */
     bool m_mem_accesses_created;
 
     /*该指令对应的访问操作，即list of memory accesses*/
@@ -1544,14 +1628,24 @@ public:
     }
 
 protected:
+    /*时序模型*/
     class gpgpu_sim *m_gpu;
-    /*运行在该simt core的kernel函数*/
+
+    /*运行在该simt core的kernel函数信息*/
     kernel_info_t *m_kernel;
+
+    /*每一个warp对应一个simt堆栈*/
     simt_stack **m_simt_stack; // pdom based reconvergence context for each warp
-    /*一维数组，用来标记core上执行的所有thread的信息，比如使用m_thread[tid]得到对应线程的信息*/
+
+    /*一维数组，用来标记core上执行的所有scala thread的信息，比如使用m_thread[tid]得到对应线程的信息*/
     class ptx_thread_info **m_thread;
+
+    /*一个warp含有的线程数量*/
     unsigned m_warp_size;
+
+    /*该simt core可以支持的warp数量，在core_t构造函数中设置为threads_per_shader / m_warp_size*/
     unsigned m_warp_count;
+    
     unsigned reduction_storage[MAX_CTA_PER_SHADER][MAX_BARRIERS_PER_CTA];
 };
 
@@ -1559,24 +1653,9 @@ protected:
  * register that can hold multiple instructions.
  * 1个寄存器集合可以包含多条指令，方便模拟，而非真实硬件结构
  * 核心数据结构是：vector<warp_inst_t *> regs
- *
-    +--------------------+
-    |   register_set     |
-    +--------------------+
-    | - std::vector<warp_inst_t *> regs | // 存储寄存器集合的向量
-    | - const char *m_name               | // 寄存器集合的名称
-    +--------------------+
-    | + register_set(num, name)          | // 构造函数，初始化寄存器集合
-    | + get_name()                       | // 获取寄存器集合的名称
-    | + has_free()                       | // 检查是否有空寄存器
-    | + has_ready()                      | // 检查是否有非空寄存器准备好
-    | + get_ready_reg_id()              | // 获取一个准备好的寄存器的ID
-    | + move_in(src)                    | // 将指令存入空寄存器
-    | + move_out_to(dest)               | // 将非空寄存器中的指令移出到目标
-    | + print(fp)                        | // 打印寄存器集合的状态
-    | + get_free()                       | // 获取一个空寄存器
-    | + get_size()                       | // 获取寄存器集合的大小
-    +--------------------+
+ * 使用案例：
+    其中在issue()阶段，The ID_OC Pipeline Register Set is used to hold the issued instructions 
+    and waits them to be used by the operand collectors (OC).
  */
 class register_set {
 public:
@@ -1709,6 +1788,7 @@ public:
         }
     }
 
+    /*找到一个空的register */
     warp_inst_t **get_free() {
         for (unsigned i = 0; i < regs.size(); i++) {
             if (regs[i]->empty()) {
@@ -1719,9 +1799,11 @@ public:
         return NULL;
     }
 
+    /**
+     * 找到一个空闲的register，对于subcore model，则采用reg_id指定的register
+     */
     warp_inst_t **get_free(bool sub_core_model, unsigned reg_id) {
-        // in subcore model, each sched has a one specific reg to use (based on
-        // sched id)
+        // in subcore model, each sched has a one specific reg to use (based on sched id)
         if (!sub_core_model)
             return get_free();
 
@@ -1736,7 +1818,10 @@ public:
     unsigned get_size() { return regs.size(); }
 
 private:
+    /*寄存器合集，每一个register保存warp_inst_t指令*/
     std::vector<warp_inst_t *> regs;
+
+    /*register set名称 */
     const char *m_name;
 };
 

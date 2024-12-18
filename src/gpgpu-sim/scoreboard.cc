@@ -56,6 +56,9 @@ void Scoreboard::printContents() const {
     }
 }
 
+/**
+ * 标识保留wid的wrap对应的目标寄存器regnum会被写入
+ */
 void Scoreboard::reserveRegister(unsigned wid, unsigned regnum) {
     if (!(reg_table[wid].find(regnum) == reg_table[wid].end())) {
         printf("Error: trying to reserve an already reserved register (sid=%d, "
@@ -81,6 +84,9 @@ const bool Scoreboard::islongop(unsigned warp_id, unsigned regnum) {
     return longopregs[warp_id].find(regnum) != longopregs[warp_id].end();
 }
 
+/**
+ * issue()指令时，其目标寄存器保留在该wrap对应的scoreboard
+ */
 void Scoreboard::reserveRegisters(const class warp_inst_t *inst) {
     for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++) {
         if (inst->out[r] > 0) {
@@ -91,6 +97,7 @@ void Scoreboard::reserveRegisters(const class warp_inst_t *inst) {
     }
 
     // Keep track of long operations
+    /*memory access要写入的寄存器的用longopregs保留 */
     if (inst->is_load() &&
         (inst->space.get_type() == global_space ||
          inst->space.get_type() == local_space ||
@@ -109,7 +116,9 @@ void Scoreboard::reserveRegisters(const class warp_inst_t *inst) {
     }
 }
 
-// Release registers for an instruction
+/**
+ * 指令完成时，即释放其在记分牌中保留的寄存器
+ */
 void Scoreboard::releaseRegisters(const class warp_inst_t *inst) {
     for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++) {
         if (inst->out[r] > 0) {
@@ -122,11 +131,11 @@ void Scoreboard::releaseRegisters(const class warp_inst_t *inst) {
 }
 
 /**
- * Checks to see if registers used by an instruction are reserved in the
- *scoreboard
- *
- * @return
- * true if WAW or RAW hazard (no WAR since in-order issue)
+ * Checks to see if registers used by an instruction are reserved in the scoreboard
+ * An instruction cannot be issued if its source registers or destination registers 
+ * are reserved in the scoreboard of its hardware warp
+ * 
+ * @return true if WAW or RAW hazard (no WAR since in-order issue)
  **/
 bool Scoreboard::checkCollision(unsigned wid, const class inst_t *inst) const {
     // Get list of all input and output registers
@@ -155,6 +164,7 @@ bool Scoreboard::checkCollision(unsigned wid, const class inst_t *inst) const {
     return false;
 }
 
+/*检查wid对应的wrap是否还有未完成写入的寄存器*/
 bool Scoreboard::pendingWrites(unsigned wid) const {
     return !reg_table[wid].empty();
 }

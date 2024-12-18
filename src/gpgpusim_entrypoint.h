@@ -38,16 +38,15 @@
 class gpgpu_context;
 
 /**
- * GPGPUsim_ctx是performance simulation model的进一步封装,主要控制如何进行时序模拟
+ * GPGPUsim_ctx是performance simulation model的进一步封装,主要控制如何进行时序模拟：
+ * 比如时序模拟的开始，以及需要模拟的operation
  * 即通过g_stream_manager不断读取CUDA API执行的op,然后通过g_the_gpu进行时序模拟
  * 包含全局唯一的g_the_gpu和g_stream_manager,
  * 同时包含启动和结束模拟的各种信号量
  */
 class GPGPUsim_ctx {
 public:
-    /**
-     * 设置g_sim_done为true
-     */
+    /**初始化 设置g_sim_done为true */
     GPGPUsim_ctx(gpgpu_context *ctx) {
         g_sim_active = false;
         g_sim_done = true;
@@ -76,13 +75,15 @@ public:
     /*全局唯一的gpgpu_sim */
     class gpgpu_sim *g_the_gpu;
 
-    /*全局唯一的stream_manager */
+    /*全局唯一的stream_manager，在cuda_runtime_api.cc中实现的各种API中压入新的op，然后去执行时序模拟 */
     class stream_manager *g_stream_manager;
 
     /*该gpgpu对应的device id */
     struct _cuda_device_id *the_cude_device;
+
     /*全局只有一个CUctx_st*/
     struct CUctx_st *the_context;
+    
     gpgpu_context *gpgpu_ctx;
 
     pthread_mutex_t g_sim_lock;

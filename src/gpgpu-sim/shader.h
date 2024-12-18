@@ -86,6 +86,9 @@ enum exec_unit_type_t {
     SPECIALIZED = 7
 };
 
+/**
+ * 用于记录在simt core上模拟的硬件thread执行的信息
+ */
 class thread_ctx_t {
 public:
     /*该thread所属的hardware CTA，不同于多维的cta索引，硬件cta id按照max_cta_num的顺序从0-max递增 */
@@ -191,6 +194,8 @@ public:
     void print_ibuffer(FILE *fout) const;
 
     unsigned get_n_completed() const { return n_completed; }
+
+    /*设置该wrap上对应lane的线程支持完毕*/
     void set_completed(unsigned lane) {
         assert(m_active_threads.test(lane));
         m_active_threads.reset(lane);
@@ -211,6 +216,7 @@ public:
 
     /*返回该wrap要执行的下一条指令的地址*/
     virtual address_type get_pc() const { return m_next_pc; }
+
     virtual kernel_info_t *get_kernel_info() const;
     void set_next_pc(address_type pc) { m_next_pc = pc; }
 
@@ -221,18 +227,23 @@ public:
         return &m_inst_at_barrier;
     }
 
+    /*在I-buffer中对应slot添加warp_inst_t指令*/
     void ibuffer_fill(unsigned slot, const warp_inst_t *pI) {
         assert(slot < IBUFFER_SIZE);
         m_ibuffer[slot].m_inst = pI;
         m_ibuffer[slot].m_valid = true;
         m_next = 0;
     }
+
+    /*返回I-buffer是否为空 */
     bool ibuffer_empty() const {
         for (unsigned i = 0; i < IBUFFER_SIZE; i++)
             if (m_ibuffer[i].m_valid)
                 return false;
         return true;
     }
+
+    /*刷新I-buffer中的指令，一般是control hazard导致 */
     void ibuffer_flush() {
         for (unsigned i = 0; i < IBUFFER_SIZE; i++) {
             if (m_ibuffer[i].m_valid)
@@ -241,12 +252,16 @@ public:
             m_ibuffer[i].m_valid = false;
         }
     }
+
     const warp_inst_t *ibuffer_next_inst() { return m_ibuffer[m_next].m_inst; }
     bool ibuffer_next_valid() { return m_ibuffer[m_next].m_valid; }
+    
+    /*释放m_next指向的Ibuffer entry */
     void ibuffer_free() {
         m_ibuffer[m_next].m_inst = NULL;
         m_ibuffer[m_next].m_valid = false;
     }
+
     void ibuffer_step() { m_next = (m_next + 1) % IBUFFER_SIZE; }
 
     bool imiss_pending() const { return m_imiss_pending; }
@@ -296,13 +311,17 @@ private:
     static const unsigned IBUFFER_SIZE = 2;
     class shader_core_ctx *m_shader;
     unsigned long long m_streamID;
+
     /*该wrap所在的CTA id */
     unsigned m_cta_id;
+
     /*wrap的ID*/
     unsigned m_warp_id;
+
     unsigned m_warp_size;
     unsigned m_dynamic_warp_id;
 
+    /*该wrap下一条要执行的指令的地址，会被simt堆栈更新*/
     address_type m_next_pc;
 
     /*一个wrap已经完成的thread数量*/
@@ -329,6 +348,8 @@ private:
     unsigned m_next;
 
     unsigned m_n_atomic; // number of outstanding atomic operations
+
+    /*建模barrier */
     bool m_membar;       // if true, warp is waiting at memory barrier
 
     /*标记该wrap中的所有thread登记退出并且资源回收完毕*/
@@ -336,8 +357,8 @@ private:
 
     unsigned long long m_last_fetch;
 
-    unsigned m_stores_outstanding; // number of store requests sent but not yet
-                                   // acknowledged
+    unsigned m_stores_outstanding; // number of store requests sent but not yet acknowledged
+
     /*完成decode即将进入simd单元执行的指令数量 */
     unsigned m_inst_in_pipeline;
 
@@ -502,7 +523,15 @@ protected:
     /*每个SIMT堆栈对应一个warp*/
     simt_stack **m_simt_stack;
     // warp_inst_t** m_pipeline_reg;
+
+    /*该scheduler负责的hard warp */
     std::vector<shd_warp_t *> *m_warp;
+
+    /**
+     * 下面的register_set用于建模：
+     * ID_OC Pipeline Register Set is used to hold the issued instructions and waits them to 
+     * be used by the operand collectors (OC)
+     */
     register_set *m_sp_out;
     register_set *m_dp_out;
     register_set *m_sfu_out;
@@ -1088,6 +1117,9 @@ private:
     shader_core_ctx *m_shader;
 };
 
+/**
+ * 
+ */
 class barrier_set_t {
 public:
     barrier_set_t(shader_core_ctx *shader, unsigned max_warps_per_core,
@@ -1192,6 +1224,27 @@ protected:
     /*参数配置*/
     const shader_core_config *m_config;
     /*simd的issue()函数把流水线寄存器中的指令移动到m_dispatch_reg等待initiation_interval个周期，模拟throughput */
+    /**
+     * warp 调度器发射指令以及读取操作数完毕后，发射到每个执行单元的指令都会被放入到对应的执行单元的 m_dispatch_reg 中，
+     * 然后指令从这个m_dispatch_reg 中被取出，并置入模拟执行流水线延迟的 m_pipeline_reg 中
+     *             m_dispatch_reg    m_pipeline_reg      
+                      / |            |---------|
+                     /  |----------> |         | 31  --|
+                    /   |            |---------|       |
+    Dispatch done every |----------> |         | :     |
+    Issue_interval cycle|            |---------|       |  Pipeline registers to
+    to model instruction|----------> |         | 2     |- model instruction latency
+    throughput          |            |---------|       |
+                        |----------> |         | 1     |
+                        |            |---------|       |
+                        |----------> |         | 0   --|
+    Dispatch position =              |---------|
+    Latency - Issue_interval             |
+                                        \|/
+                                         V
+                                    m_result_port --> write back stage
+     */
+
     warp_inst_t *m_dispatch_reg;
     /*最长的ALU指令的延迟，即流水线寄存器级数至多有512 */
     static const unsigned MAX_ALU_LATENCY = 512;
@@ -2672,7 +2725,7 @@ protected:
 
     std::bitset<MAX_THREAD_PER_SM> m_active_threads;
 
-    /*m_threadState标记整个Simt Core的所有的thread的状态 */
+    /*m_threadState标记整个Simt Core的所有的hw thread的状态 */
     thread_ctx_t *m_threadState;
 
     // interconnect interface
@@ -2685,12 +2738,31 @@ protected:
     int m_last_warp_fetched;
 
     // 下面是decode/dispatch阶段涉及的组件
-    /*在该simt core执行的所有wrap的信息 */
-    std::vector<shd_warp_t *> m_warp; // per warp information array
+    /*在该simt core执行的所有wrap的动态信息 */
+    std::vector<shd_warp_t *> m_warp; 
+
+    /*用于处理CTA内wrap的同步*/
     barrier_set_t m_barriers;
 
     /*m_inst_fetch_buffer是fetch和decode阶段之间的pipeline register */
     ifetch_buffer_t m_inst_fetch_buffer;
+    
+    /**
+     * 每一个simt core有一系列register set，用于建模流水线寄存器
+     * 每一个scheduler unit有一个指针指向这些register set
+     * 比如在：
+     * // in scheduler_unit
+        register_set *m_sp_out;
+        register_set *m_dp_out;
+        register_set *m_sfu_out;
+        register_set *m_int_out;
+        register_set *m_tensor_core_out;
+        register_set *m_mem_out;
+        std::vector<register_set *> &m_spec_cores_out;
+
+        The enrties in the shader_core_ctx::m_pipeline_reg are created in the function 
+        shader_core_ctx::create_front_pipeline()
+     * */
     std::vector<register_set> m_pipeline_reg;
 
     /*每一个simt core有一个记分牌，其中每一个wrap都有一个对应的目的寄存器列表 */

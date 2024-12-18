@@ -106,10 +106,12 @@ void exec_shader_core_ctx::create_shd_warp() {
 /**
  * 1. 
  * 2. 初始化fetch()阶段需要的m_last_warp_fetched和m_L1I
+ * 3.
  */
 void shader_core_ctx::create_front_pipeline() {
     // pipeline_stages is the sum of normal pipeline stages and specialized_unit
     // stages * 2 (for ID and EX)
+    /*创建所有流水线需要的pipeline register*/
     unsigned total_pipeline_stages =
         N_PIPELINE_STAGES + m_config->m_specialized_unit.size() * 2;
     m_pipeline_reg.reserve(total_pipeline_stages);
@@ -534,8 +536,13 @@ shader_core_ctx::shader_core_ctx(class gpgpu_sim *gpu,
     m_occupied_cta_to_hwtid.clear();
 }
 
+/**
+ * 把索引从start_thread到end_thread的硬件状态重置，即重置m_threadState
+ * 同时重置warp对应的状态信息和simt堆栈
+ */
 void shader_core_ctx::reinit(unsigned start_thread, unsigned end_thread,
                              bool reset_not_completed) {
+    /*默认为false*/
     if (reset_not_completed) {
         m_not_completed = 0;
         m_active_threads.reset();
@@ -549,10 +556,13 @@ void shader_core_ctx::reinit(unsigned start_thread, unsigned end_thread,
         m_occupied_cta_to_hwtid.clear();
         m_active_warps = 0;
     }
+    /*所有的thread状态重置 */
     for (unsigned i = start_thread; i < end_thread; i++) {
         m_threadState[i].n_insn = 0;
         m_threadState[i].m_cta_id = -1;
     }
+    
+    /*warp对应的状态重置 */
     for (unsigned i = start_thread / m_config->warp_size;
          i < end_thread / m_config->warp_size; ++i) {
         m_warp[i]->reset();
@@ -560,9 +570,13 @@ void shader_core_ctx::reinit(unsigned start_thread, unsigned end_thread,
     }
 }
 
+/**
+ * 对第cta_id个CTA中，从start_thread到end_thread个线程所属的所有warp进行初始化
+ */
 void shader_core_ctx::init_warps(unsigned cta_id, unsigned start_thread,
                                  unsigned end_thread, unsigned ctaid,
                                  int cta_size, kernel_info_t &kernel) {
+    /*功能模拟过程中，用warp的起始PC值（用该warp的首个线程m_thread[warpId*m_warp_size]->get_pc()获取）*/
     address_type start_pc = next_pc(start_thread);
     unsigned kernel_id = kernel.get_uid();
     if (m_config->model == POST_DOMINATOR) {
@@ -576,12 +590,17 @@ void shader_core_ctx::init_warps(unsigned cta_id, unsigned start_thread,
             for (unsigned t = 0; t < m_config->warp_size; t++) {
                 unsigned hwtid = i * m_config->warp_size + t;
                 if (hwtid < end_thread) {
+                    /*活跃的thread数量加一*/
                     n_active++;
                     assert(!m_active_threads.test(hwtid));
+                    /*设置在整个simt core上线程活跃mask*/
                     m_active_threads.set(hwtid);
+                    /*设置在该warp的活跃线程mask*/
                     active_threads.set(t);
                 }
             }
+
+            /*启动该warp对应的simt堆栈*/
             m_simt_stack[i]->launch(start_pc, active_threads);
 
             if (m_gpu->resume_option == 1 &&
@@ -606,12 +625,16 @@ void shader_core_ctx::init_warps(unsigned cta_id, unsigned start_thread,
                             m_dynamic_warp_id, kernel.get_streamID());
             ++m_dynamic_warp_id;
             m_not_completed += n_active;
+            /*活跃warp的数量增1*/
             ++m_active_warps;
         }
     }
 }
 
 // return the next pc of a thread
+/**
+ * 
+ */
 address_type shader_core_ctx::next_pc(int tid) const {
     if (tid == -1)
         return -1;
@@ -923,6 +946,9 @@ void exec_shader_core_ctx::get_pdom_stack_top_info(unsigned warp_id,
     m_simt_stack[warp_id]->get_pdom_stack_top_info(pc, rpc);
 }
 
+/**
+ * 得到warp_id对应的thread mask，第二个参数没用上
+ */
 const active_mask_t &
 exec_shader_core_ctx::get_active_mask(unsigned warp_id, const warp_inst_t *pI) {
     return m_simt_stack[warp_id]->get_active_mask();
@@ -1142,6 +1168,11 @@ void shader_core_ctx::fetch() {
     m_L1I->cycle();
 }
 
+/**
+ * 在性能模型 shader_core_ctx::issue_warp 函数执行时，即指令确定能发射时，调用该函数对指令进行功能模拟。
+ * 功能模拟的过程中，如果指令是load或store指令，则生成内存访问的必要的信息，
+ * 例如：设置 access_type，计算一个 warp 指令对 shared memory 访存的执行周期等
+ */
 void exec_shader_core_ctx::func_exec_inst(warp_inst_t &inst) {
     execute_warp_inst_t(inst);
     if (inst.is_load() || inst.is_store()) {
@@ -1150,22 +1181,40 @@ void exec_shader_core_ctx::func_exec_inst(warp_inst_t &inst) {
     }
 }
 
+/**
+ * 对于每个each hard warp selected by the scheduler unit，通过记分牌等各种检查后调用issue_warp()完成实际的issue逻辑。逻辑如下
+ * 1. 把待发射的指令移入ID_OC的register
+ * 2. 调用func_exec_inst()-->execute_warp_inst_t()通过function sim模拟器执行该指令并更新simt堆栈
+ * 3. 发射成功后根据该指令的目标寄存器更新记分牌
+ * register_set &pipe_reg_set：把指令issue到对应的ID_OC Pipeline Register Set，等待operator collect
+ * const warp_inst_t *next_inst：表示要被发射的指令
+ * 
+ */
 void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
                                  const warp_inst_t *next_inst,
                                  const active_mask_t &active_mask,
                                  unsigned warp_id, unsigned sch_id) {
-    warp_inst_t **pipe_reg =
-        pipe_reg_set.get_free(m_config->sub_core_model, sch_id);
+    /**
+     * 在ID_OC Pipeline Register Set寻找一个空闲的register来缓存被发射的指令
+     * 在subcore模式下，每个warp调度器在寄存器集合中有一个具体的寄存器可供使用，这个寄存器由调度器的m_id索引
+     */
+    warp_inst_t **pipe_reg = pipe_reg_set.get_free(m_config->sub_core_model, sch_id);
     assert(pipe_reg);
 
+    /*释放对应的I-buffer entry*/
     m_warp[warp_id]->ibuffer_free();
     assert(next_inst->valid());
+
+    /**把需要发射的warp对应的指令放入之前得到的空闲寄存器 */
     **pipe_reg = *next_inst; // static instruction information
     (*pipe_reg)->issue(
         active_mask, warp_id, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle,
         m_warp[warp_id]->get_dynamic_warp_id(), sch_id,
         m_warp[warp_id]->get_streamID()); // dynamic instruction information
+    
     m_stats->shader_cycle_distro[2 + (*pipe_reg)->active_count()]++;
+
+    /*Perform functional execution*/
     func_exec_inst(**pipe_reg);
 
     // Add LDGSTS instructions into a buffer
@@ -1238,15 +1287,20 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
             }
         }
     }
-
+    
+    /**更新simt堆栈信息 */
     updateSIMTStack(warp_id, *pipe_reg);
 
+    /*发射成功时要在记分牌保留该指令要写入的寄存器id列表*/
     m_scoreboard->reserveRegisters(*pipe_reg);
+
+    /**/
     m_warp[warp_id]->set_next_pc(next_inst->pc + next_inst->isize);
 }
 
 /**
- * 
+ * 在每个SIMT Core中，都有可配置数量的scheduler。函数shader_core_ctx::issue()在这些scheduler上按照一定顺序轮询，
+ * 其中每一个单元都执行scheduler_unit::cycle()，在这里对 hw的warp进行轮循。
  */
 void shader_core_ctx::issue() {
     // Ensure fair round robin issu between schedulers
@@ -1263,6 +1317,7 @@ void shader_core_ctx::issue() {
     //}
 }
 
+/*根据wrap_id取出对应的shd_warp_t*/
 shd_warp_t &scheduler_unit::warp(int i) { return *((*m_warp)[i]); }
 
 /**
@@ -1385,16 +1440,28 @@ void scheduler_unit::order_by_priority(
  */
 void scheduler_unit::cycle() {
     SCHED_DPRINTF("scheduler_unit::cycle()\n");
+
     /*there was one warp with a valid instruction to issue (didn't require flush due to control hazard)*/
     /*ibuffer中取出的PC值与SIMT堆栈中的PC值匹配，则说明没有控制冒险*/
     bool valid_inst = false; 
+
     /*of the valid instructions, there was one not waiting for pending register writes*/
     /*指令通过记分板检查，就可以将指令ready状态设置为true*/    
     bool ready_inst = false; 
+
     /*指令发射成功后，设置issued_inst为真*/
     bool issued_inst = false; // of these we issued one
 
+    /**
+     * warp是根据某些策略重新排序的，这是不同调度器之间的主要区别
+     * 为当前调度单元内所划分到的warp进行排序
+     */
     order_warps();
+
+    /**
+     * m_next_cycle_prioritized_warps里存储了排序后的下一拍应优先调度的warp顺序
+     * 遍历整个优先级的warp列表，依次进行调度
+     */
     for (std::vector<shd_warp_t *>::const_iterator iter = m_next_cycle_prioritized_warps.begin();
          iter != m_next_cycle_prioritized_warps.end(); iter++) {
         // Don't consider warps that are not yet valid
@@ -1406,8 +1473,7 @@ void scheduler_unit::cycle() {
         unsigned warp_id = (*iter)->get_warp_id();
         unsigned checked = 0;
         unsigned issued = 0;
-        exec_unit_type_t previous_issued_inst_exec_type =
-            exec_unit_type_t::NONE;
+        exec_unit_type_t previous_issued_inst_exec_type = exec_unit_type_t::NONE;
         unsigned max_issue = m_shader->m_config->gpgpu_max_insn_issue_per_warp;
         bool diff_exec_units =
             m_shader->m_config
@@ -1415,23 +1481,40 @@ void scheduler_unit::cycle() {
                                                     // allow dual issue to diff
                                                     // execution units (as in
                                                     // Maxwell and Pascal)
-
+        
+        /*if warp's ibuffer is empty: continue*/
         if (warp(warp_id).ibuffer_empty())
             SCHED_DPRINTF("Warp (warp_id %u, dynamic_warp_id %u) fails as "
                           "ibuffer_empty\n",
                           (*iter)->get_warp_id(),
                           (*iter)->get_dynamic_warp_id());
 
+        /*if the warp is waiting for a barrier: continue*/
         if (warp(warp_id).waiting())
             SCHED_DPRINTF(
                 "Warp (warp_id %u, dynamic_warp_id %u) fails as waiting for "
                 "barrier\n",
                 (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id());
 
+        /**
+         * 1. wrap对应的buffer有效，即有fetch()阶段从Icache取出的指令
+         * 2. 该wrap并没由于各种barrier并且未处于waiting中
+         * 即：the scheduler finds a hardware warp with a valid ibuffer slot and not waiting for barrier
+         * 
+         * checked是下面循环的循环次数，即在当前可调度的warp下，执行检测这个warp的可发射指令数至多为
+         * max_issue，在V100配置中为1，即无论这个循环中有没有将指令发射出去，都不能再进行第二轮循环，
+         * 因为单个warp被配置为每次至多调度一条指令
+         * 
+         * issued是当前warp中记录的发射的指令计数值，该值不能超过当前warp的最大可发射指令数max_issue。
+         * 
+         * 同时，checked次数必须保证小于等于issued，因为一旦checked次数大于issued
+         * */
         while (!warp(warp_id).waiting() && !warp(warp_id).ibuffer_empty() &&
                (checked < max_issue) && (checked <= issued) &&
                (issued < max_issue)) {
+            /*从warp对应的I-buffer中取出指令*/
             const warp_inst_t *pI = warp(warp_id).ibuffer_next_inst();
+
             // Jin: handle cdp latency;
             if (pI && pI->m_is_cdp && warp(warp_id).m_cdp_latency > 0) {
                 assert(warp(warp_id).m_cdp_dummy);
@@ -1449,30 +1532,42 @@ void scheduler_unit::cycle() {
                 (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id(),
                 m_shader->m_config->gpgpu_ctx->func_sim->ptx_get_insn_str(pc)
                     .c_str());
+            
+            /*get the instruction from the ibuffer and check if it is valid*/
             if (pI) {
                 assert(valid);
+                /**
+                 * For a valid instruction, if its pc doesn't match the current pc, 
+                 * it means that control hazard happens, and the ibuffer is flused
+                 * 即pc是stack堆栈中下一条指令的地址，而pI->pc是I-buffer之前由于fetch()取回的导致control hazard的指令的地址
+                 * 说明跳转发生，需要清空该wrap对应I-buffer的所有内容，并且设置该warp的next pc
+                 */
                 if (pc != pI->pc) {
                     SCHED_DPRINTF(
                         "Warp (warp_id %u, dynamic_warp_id %u) control hazard "
                         "instruction flush\n",
                         (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id());
                     // control hazard
+                    /*将warp下一次执行的指令PC值设置为从SIMT堆栈中取出的PC*/
                     warp(warp_id).set_next_pc(pc);
+                    /*刷新warp的ibuffer，因为ibuffer此刻已有的指令已经不会再执行*/
                     warp(warp_id).ibuffer_flush();
                 } else {
                     valid_inst = true;
+                    /*source and destination registers are passed to the scoreboard for collision checking*/
                     if (!m_scoreboard->checkCollision(warp_id, pI)) {
                         SCHED_DPRINTF("Warp (warp_id %u, dynamic_warp_id %u) "
                                       "passes scoreboard\n",
                                       (*iter)->get_warp_id(),
                                       (*iter)->get_dynamic_warp_id());
+                        /*指令通过记分牌检查，就可以将指令ready状态设置为true*/
                         ready_inst = true;
-
                         const active_mask_t &active_mask =
                             m_shader->get_active_mask(warp_id, pI);
 
                         assert(warp(warp_id).inst_in_pipeline());
 
+                        /*MEM相关的指令，需要发送到m_mem_out流水线寄存器，等待operand collectors*/
                         if ((pI->op == LOAD_OP) || (pI->op == STORE_OP) ||
                             (pI->op == MEMORY_BARRIER_OP) ||
                             (pI->op == TENSOR_CORE_LOAD_OP) ||
@@ -1484,7 +1579,9 @@ void scheduler_unit::cycle() {
                                      exec_unit_type_t::MEM)) {
                                 m_shader->issue_warp(
                                     *m_mem_out, pI, active_mask, warp_id, m_id);
+                                // 发射的指令计数值加一
                                 issued++;
+                                // 指令发射成功后，设置issued_inst为真
                                 issued_inst = true;
                                 warp_inst_issued = true;
                                 previous_issued_inst_exec_type =
@@ -1718,6 +1815,7 @@ void scheduler_unit::cycle() {
             checked++;
         }
         
+        // 循环结束，根据是否issue成功更新warp order
         if (issued) {
             // This might be a bit inefficient, but we need to maintain
             // two ordered list for proper scheduler execution.
@@ -2186,23 +2284,26 @@ void shader_core_ctx::writeback() {
 }
 
 /**
- * 判断inst访问shared memory是否会stall，如果stall返回true
+ * 判断inst访问shared memory是否因为bank conflict导致stall，如果stall返回true
  */
 bool ldst_unit::shared_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
                              mem_stage_access_type &fail_type) {
     /*指令不是shared memory指令 */
     if (inst.space.get_type() != shared_space)
         return true;
+
     /*指令对应的活跃线程数为0 */
     if (inst.active_count() == 0)
         return true;
 
-    /*建模指令的访问延迟，依然在访问该bank*/
+    /*建模指令的访问延迟，访问该bank需要多个周期*/
     if (inst.has_dispatch_delay()) {
         m_stats->gpgpu_n_shmem_bank_access[m_sid]++;
     }
 
     bool stall = inst.dispatch_delay();
+    
+    /*出现bank conflict */
     if (stall) {
         fail_type = S_MEM;
         rc_fail = BK_CONF;
@@ -2507,6 +2608,10 @@ bool ldst_unit::texture_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
     return inst.accessq_empty(); // done if empty.
 }
 
+/**
+ * 处理warp_inst_t &inst中的访存请求
+ * 判断LDST单元访问global/local/param memory是否会Stall。Stall的话返回 false，没有Stall的话返回 true。
+*/
 bool ldst_unit::memory_cycle(warp_inst_t &inst,
                              mem_stage_stall_type &stall_reason,
                              mem_stage_access_type &access_type) {
@@ -2525,11 +2630,12 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
     bool bypassL1D = false;
     if (CACHE_GLOBAL == inst.cache_op || (m_L1D == NULL)) {
         bypassL1D = true;
-    } else if (inst.space.is_global()) { // global memory access
-        // skip L1 cache if the option is enabled
+    } else if (inst.space.is_global()) { // global memory access skip L1 cache if the option is enabled
         if (m_core->get_config()->gmem_skip_L1D && (CACHE_L1 != inst.cache_op))
             bypassL1D = true;
     }
+
+    // 只有在使用ld.cg时才会绕过L1数据缓存
     if (bypassL1D) {
         // bypass L1 cache
         unsigned control_size =
@@ -2575,6 +2681,7 @@ bool ldst_unit::response_buffer_full() const {
     return m_response_fifo.size() >= m_config->ldst_unit_response_queue_size;
 }
 
+/*ldst_unit接受来自memory system的响应 */
 void ldst_unit::fill(mem_fetch *mf) {
     mf->set_status(IN_SHADER_LDST_RESPONSE_FIFO,
                    m_core->get_gpu()->gpu_sim_cycle +
@@ -2582,6 +2689,7 @@ void ldst_unit::fill(mem_fetch *mf) {
     m_response_fifo.push_back(mf);
 }
 
+/*Flush L1D cache，暂时未实现把dirty写回下级内存*/
 void ldst_unit::flush() {
     // Flush L1D cache
     m_L1D->flush();
@@ -3138,11 +3246,11 @@ inst->space.get_type() != shared_space) { unsigned warp_id = inst->warp_id();
 */
 
 /**
- * 1. 处理来自m_response_fifo的内存响应
- * 2. 
+ * 1. 把访存完成的的inst的结果写回register file，修改记分牌
+ * 2. 处理来自m_response_fifo的内存响应
+ * 3. 
  */
 void ldst_unit::cycle() {
-    
     /*把访存完成的的inst的结果写回register file，修改记分牌*/
     writeback();
 
@@ -3152,7 +3260,10 @@ void ldst_unit::cycle() {
             !m_pipeline_reg[stage + 1]->empty())
             move_warp(m_pipeline_reg[stage], m_pipeline_reg[stage + 1]);
 
-    /*处理来自Memory Subsystem的内存响应，handling memory (data) replies coming back from the L2 */
+    /**
+     * 处理来自Memory Subsystem的内存响应，handling memory (data) replies coming back from the L2 
+     * 这里的m_response_fifo和SIMT Core Clusters全局的 response FIFO相连
+    */
     if (!m_response_fifo.empty()) {
         mem_fetch *mf = m_response_fifo.front();
         if (mf->get_access_type() == TEXTURE_ACC_R) {
@@ -3177,13 +3288,13 @@ void ldst_unit::cycle() {
                 m_response_fifo.pop_front();
                 delete mf;
             } else {
-                assert(!mf->get_is_write()); // L1 cache is write evict, allocate line on load miss only
+                /*L1 cache is write evict, allocate line on load miss only*/
+                assert(!mf->get_is_write());
 
-                // bypassL1D是指代数据访问是否绕过L1数据缓存
+                /*bypassL1D是指代数据访问是否绕过L1数据缓存*/
                 /**L1缓存由于竞争严重，命中率低，选择绕过L1可以直接把下级的响应直接转发给运算单元或者寄存器文件 */
                 bool bypassL1D = false;
-                if (CACHE_GLOBAL == mf->get_inst().cache_op ||
-                    (m_L1D == NULL)) {
+                if (CACHE_GLOBAL == mf->get_inst().cache_op || (m_L1D == NULL)) {
                     /**CACHE_GLOBAL==.cg，Cache at global level，全局级缓存（L2及以下缓存，而不是L1）。
                      * 使用ld.cg全局性地加载，绕过L1缓存，并仅缓存在L2缓存中 */
                     bypassL1D = true;
@@ -3193,6 +3304,8 @@ void ldst_unit::cycle() {
                     if (m_core->get_config()->gmem_skip_L1D)
                         bypassL1D = true;
                 }
+
+                /*只有在使用ld.cg时才会绕过L1数据缓存*/
                 if (bypassL1D) {
                     /*m_next_global是下一次访问全局存储的mf，如果它空闲，则m_next_global = mf，空闲的话就无法继续放出该次访问*/
                     if (m_next_global == NULL) {
@@ -3204,9 +3317,9 @@ void ldst_unit::cycle() {
                         m_next_global = mf;
                     }
                 } else {
+                    /*L1 Dcache调用fill()函数把下级内存的响应写进L1 Dcache */
                     if (m_L1D->fill_port_free()) {
-                        m_L1D->fill(mf,
-                                    m_core->get_gpu()->gpu_sim_cycle +
+                        m_L1D->fill(mf,m_core->get_gpu()->gpu_sim_cycle +
                                         m_core->get_gpu()->gpu_tot_sim_cycle);
                         m_response_fifo.pop_front();
                     }
@@ -4087,8 +4200,7 @@ void shader_core_ctx::cache_invalidate() { m_ldst_unit->invalidate(); }
 
 // modifiers
 std::list<opndcoll_rfu_t::op_t> opndcoll_rfu_t::arbiter_t::allocate_reads() {
-    std::list<op_t>
-        result; // a list of registers that (a) are in different register banks,
+    std::list<op_t> result; // a list of registers that (a) are in different register banks,
                 // (b) do not go to the same operand collector
 
     int input;
@@ -4384,13 +4496,21 @@ bool shader_core_ctx::check_if_non_released_reduction_barrier(
     return non_released_barrier_reduction;
 }
 
+/**
+ * CTA中的wrap之间需要同步
+ */
 bool shader_core_ctx::warp_waiting_at_barrier(unsigned warp_id) const {
     return m_barriers.warp_waiting_at_barrier(warp_id);
 }
 
+/**
+ * 该wrap中存在memory barrier指令，造成wrap等待
+ */
 bool shader_core_ctx::warp_waiting_at_mem_barrier(unsigned warp_id) {
+
     if (!m_warp[warp_id]->get_membar())
         return false;
+    
     if (!m_scoreboard->pendingWrites(warp_id)) {
         m_warp[warp_id]->clear_membar();
         if (m_gpu->get_config().flush_l1()) {
@@ -4410,6 +4530,10 @@ bool shader_core_ctx::warp_waiting_at_mem_barrier(unsigned warp_id) {
 
 /**
  * 设置成员变量：kernel_max_cta_per_shader
+ * 可以在一个simt core上同时运行的最大CTA的数量，由下面的因素决定：
+ * the number of threads per thread block specified by the program, the per-thread register usage, 
+ * the shared memory usage, 
+ * and the configured limit on maximum number of thread blocks per core
  */
 void shader_core_ctx::set_max_cta(const kernel_info_t &kernel) {
     // calculate the max cta count and cta size for local memory address mapping
@@ -4506,6 +4630,10 @@ bool shd_warp_t::hardware_done() const {
     return functional_done() && stores_done() && !inst_in_pipeline();
 }
 
+/**
+ * warp已经执行完毕且在等待新内核初始化、CTA处于barrier、memory barrier、还有未完成的原子操作
+ * 以上操作导致wrap处于等待状态，不能被issue到功能单元执行
+ */
 bool shd_warp_t::waiting() {
     if (functional_done()) {
         // waiting to be initialized with a kernel
@@ -4988,8 +5116,7 @@ unsigned simt_core_cluster::issue_block2core() {
         kernel_info_t *kernel;
         // Jin: fetch kernel according to concurrent kernel setting
         if (m_config->gpgpu_concurrent_kernel_sm) { 
-            // concurrent kernel on sm
-            // always select latest issued kernel
+            // concurrent kernel on sm，always select latest issued kernel
             kernel_info_t *k = m_gpu->select_kernel();
             kernel = k;
         } else {
@@ -5254,6 +5381,7 @@ void exec_shader_core_ctx::checkExecutionStatusAndUpdate(warp_inst_t &inst,
             inst.data_size, (new_addr_type *)localaddrs);
         inst.set_addr(t, (new_addr_type *)localaddrs, num_addrs);
     }
+
     if (ptx_thread_done(tid)) {
         m_warp[inst.warp_id()]->set_completed(t);
         m_warp[inst.warp_id()]->ibuffer_flush();

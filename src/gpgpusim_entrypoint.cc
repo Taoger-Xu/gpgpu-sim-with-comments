@@ -81,8 +81,7 @@ static void termination_callback() {
 }
 
 /**
- * 对于cuda引用，运行gpgpu_sim_thread_concurrent进行时序模拟
- * 使用active
+ * 对于cuda应用，运行gpgpu_sim_thread_concurrent进行时序模拟
  */
 void *gpgpu_sim_thread_concurrent(void *ctx_ptr) {
     gpgpu_context *ctx = (gpgpu_context *)ctx_ptr;
@@ -99,7 +98,7 @@ void *gpgpu_sim_thread_concurrent(void *ctx_ptr) {
                    "work ***\n");
             fflush(stdout);
         }
-        /*没有operation需要执行，等待 */
+        /*没有operation需要执行，等待模拟的cuda API压入新的operation */
         while (ctx->the_gpgpusim->g_stream_manager->empty_protected() &&
                !ctx->the_gpgpusim->g_sim_done);
         

@@ -33,11 +33,12 @@
 #include "addrdec.h"
 #include <bitset>
 
+/*mem_fetch对象请求类型*/
 enum mf_type {
-    READ_REQUEST = 0,
-    WRITE_REQUEST,
-    READ_REPLY, // send to shader
-    WRITE_ACK
+    READ_REQUEST = 0, // 读请求
+    WRITE_REQUEST, // 写请求
+    READ_REPLY, // 读响应，send to shader
+    WRITE_ACK  // 写确认，memory system to shader
 };
 
 #define MF_TUP_BEGIN(X) enum X {

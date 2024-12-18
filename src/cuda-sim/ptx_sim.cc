@@ -147,6 +147,9 @@ ptx_thread_info::~ptx_thread_info() {
   m_gpu->gpgpu_ctx->func_sim->g_ptx_thread_info_delete_count++;
 }
 
+/**
+ * 
+ */
 ptx_thread_info::ptx_thread_info(kernel_info_t &kernel) : m_kernel(kernel) {
   m_uid = kernel.entry()->gpgpu_ctx->func_sim->g_ptx_thread_info_uid_next++;
   m_core = NULL;

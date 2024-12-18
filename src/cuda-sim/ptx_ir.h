@@ -1448,18 +1448,23 @@ private:
     /*用于表示GPGPU-Sim内核是否已经完成编译和装配。如果内核已经完成编译和装配，则m_assembled变量的值为true */
     bool m_assembled;
     bool pdom_done; // flag to check whether pdom is completed or not
+    
     /*m_name是由nvcc编译器编译后的PTX指令中为内核函数指定的唯一的函数名*/
     std::string m_name;
+
+    /*该function_info 拥有一堆静态待执行的 ptx instruction*/
     ptx_instruction **m_instr_mem;
     unsigned m_start_PC;
     unsigned m_instr_mem_size;
     std::map<std::string, param_t> m_kernel_params;
+
     /**存储每一个kernel arguments */
     std::map<unsigned, param_info> m_ptx_kernel_param_info;
     std::vector<std::pair<size_t, unsigned>> m_param_configs;
     const symbol *m_return_var_sym;
     std::vector<const symbol *> m_args;
-    /*PTX指令列表 */
+    
+    /*下面可能用于指令流分析*/
     std::list<ptx_instruction *> m_instructions;
     std::vector<basic_block_t *> m_basic_blocks;
     std::list<std::pair<unsigned, unsigned>> m_back_edges;

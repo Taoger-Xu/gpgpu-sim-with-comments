@@ -514,6 +514,9 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
     return status;
 }
 
+/**
+ * 采用ON_FILL策略
+ */
 void tag_array::fill(new_addr_type addr, unsigned time, mem_fetch *mf,
                      bool is_write) {
     fill(addr, time, mf->get_access_sector_mask(), mf->get_access_byte_mask(),
@@ -589,8 +592,7 @@ void tag_array::flush() {
     for (unsigned i = 0; i < m_config.get_num_lines(); i++)
         if (m_lines[i]->is_modified_line()) {
             for (unsigned j = 0; j < SECTOR_CHUNCK_SIZE; j++) {
-                m_lines[i]->set_status(INVALID,
-                                       mem_access_sector_mask_t().set(j));
+                m_lines[i]->set_status(INVALID,mem_access_sector_mask_t().set(j));
             }
         }
 
@@ -598,6 +600,7 @@ void tag_array::flush() {
     is_used = false;
 }
 
+/*设置所有cache Line状态为 INVALID */
 void tag_array::invalidate() {
     if (!is_used)
         return;
@@ -1429,7 +1432,7 @@ void baseline_cache::cycle() {
 /**
  * fill()处理接收到lower memory level的响应后如何修改cache block status以及释放对应的mshr entry
  * 1. 对于sector cache要等待最后一个mf返回才说明取回整个cache line的数据，而对于line cache，返回的mf肯定对应一个cache line。
- * 
+ * 2. 调用tag_array->fill()完成填充
  */
 void baseline_cache::fill(mem_fetch *mf, unsigned time) {
     /**对于sector cache，需要看当前mf是否是一个大mf分割后返回的最后一个小mf；
@@ -1451,6 +1454,7 @@ void baseline_cache::fill(mem_fetch *mf, unsigned time) {
             /*如果m_extra_mf_fields[mf].pending_read等于0，说明这个mf已经是最后一个分割的mf了，
             不需要再等待其他与mf相同请求的数据，可以填充到cache中。 */
             mem_fetch *temp = mf;
+            /*得到最初的mem_fetch */
             mf = mf->get_original_mf();
             delete temp;
         }

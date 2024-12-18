@@ -49,6 +49,7 @@ extern void print_splash();
 
 extern void
 ptxinfo_opencl_addinfo(std::map<std::string, function_info *> &kernels);
+
 unsigned ptx_sim_init_thread(kernel_info_t &kernel,
                              class ptx_thread_info **thread_info, int sid,
                              unsigned tid, unsigned threads_left,
@@ -77,6 +78,7 @@ public:
     }
     //! executes all warps till completion
     void execute(int inst_count, unsigned ctaid_cp);
+
     virtual void warp_exit(unsigned warp_id);
     virtual bool warp_waiting_at_barrier(unsigned warp_id) const {
         return (m_warpAtBarrier[warp_id] || !(m_liveThreadCount[warp_id] > 0));
@@ -97,7 +99,13 @@ private:
     void createWarp(unsigned warpId);
 
     // each warp live thread count and barrier indicator
+    /*每个warp活跃线程数。m_liveThreadCount在构造函数中被定义为一个具有[warp总数]长度的unsigned列表*/
     unsigned *m_liveThreadCount;
+
+    /**
+     * warp屏障指示器，即每一个warp都有一个指示位，标志该warp是否进入屏障指令执行阶段。m_warpAtBarrier
+     * 在构造函数中被定义为一个具有[warp总数]长度的bool列表
+     */
     bool *m_warpAtBarrier;
 };
 
@@ -119,8 +127,7 @@ class cuda_sim {
 public:
     cuda_sim(gpgpu_context *ctx) {
         g_ptx_sim_num_insn = 0;
-        g_ptx_kernel_count =
-            -1; // used for classification stat collection purposes
+        g_ptx_kernel_count = -1; // used for classification stat collection purposes
         gpgpu_param_num_shaders = 0;
         g_cuda_launch_blocking = false;
         g_inst_classification_stat = NULL;
@@ -180,6 +187,8 @@ public:
     class gpgpu_context *gpgpu_ctx;
     // global functions
     void ptx_opcocde_latency_options(option_parser_t opp);
+
+    /*Functional Simulation的主函数*/
     void gpgpu_cuda_ptx_sim_main_func(kernel_info_t &kernel,
                                       bool openCL = false);
     int gpgpu_opencl_ptx_sim_main_func(kernel_info_t *grid);

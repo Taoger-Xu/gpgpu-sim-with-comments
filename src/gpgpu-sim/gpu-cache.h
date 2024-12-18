@@ -1551,7 +1551,7 @@ public:
     /*用于处理来自lower memory level的内存响应 */
     void fill(mem_fetch *mf, unsigned time);
 
-    /// Checks if mf is waiting to be filled by lower memory level
+    // Checks if mf is waiting to be filled by lower memory level
     bool waiting_for_fill(mem_fetch *mf);
 
     /*之前cache miss的data已经返回*/
@@ -1578,8 +1578,10 @@ public:
     void get_sub_stats(struct cache_sub_stats &css) const {
         m_stats.get_sub_stats(css);
     }
+
     // Clear per-window stats for AerialVision support
     void clear_pw() { m_stats.clear_pw(); }
+
     // Per-window sub stats for AerialVision support
     void get_sub_stats_pw(struct cache_sub_stats_pw &css) const {
         m_stats.get_sub_stats_pw(css);
@@ -1606,8 +1608,7 @@ public:
     // filling the cache on cudamemcopies. We don't care about anything other
     // than L2 state after the memcopy - so just force the tag array to act as
     // though something is read or written without doing anything else.
-    void force_tag_access(new_addr_type addr, unsigned time,
-                          mem_access_sector_mask_t mask) {
+    void force_tag_access(new_addr_type addr, unsigned time, mem_access_sector_mask_t mask) {
         mem_access_byte_mask_t byte_mask;
         m_tag_array->fill(addr, time, mask, byte_mask, true);
     }
@@ -1639,6 +1640,7 @@ protected:
      * 当遇到miss的请求需要访问下一级存储时，会把miss的请求放到m_miss_queue中。
      */
     std::list<mem_fetch *> m_miss_queue;
+
     enum mem_fetch_status m_miss_queue_status;
 
     /**
@@ -1690,12 +1692,13 @@ protected:
         return ((m_miss_queue.size() + num_miss) >= m_config.m_miss_queue_size);
     }
 
-    /// Read miss handler without writeback
+    // Read miss handler without writeback
     void send_read_request(new_addr_type addr, new_addr_type block_addr,
                            unsigned cache_index, mem_fetch *mf, unsigned time,
                            bool &do_miss, std::list<cache_event> &events,
                            bool read_only, bool wa);
-    /// Read miss handler. Check MSHR hit or MSHR available
+    
+    // Read miss handler. Check MSHR hit or MSHR available
     void send_read_request(new_addr_type addr, new_addr_type block_addr,
                            unsigned cache_index, mem_fetch *mf, unsigned time,
                            bool &do_miss, bool &wb, evicted_block_info &evicted,
